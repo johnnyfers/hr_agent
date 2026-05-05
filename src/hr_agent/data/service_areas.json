@@ -1,0 +1,25 @@
+{
+  "ES": [
+    "Madrid", "Barcelona", "Valencia", "Sevilla", "Zaragoza",
+    "Málaga", "Murcia", "Palma", "Las Palmas de Gran Canaria", "Bilbao",
+    "Alicante", "Córdoba", "Valladolid", "Vigo", "Gijón",
+    "Granada", "A Coruña", "Vitoria-Gasteiz", "Elche", "Oviedo",
+    "Santa Cruz de Tenerife", "Pamplona", "Almería", "San Sebastián", "Burgos"
+  ],
+  "MX": [
+    "Ciudad de México", "Guadalajara", "Monterrey", "Puebla", "Tijuana",
+    "León", "Juárez", "Zapopan", "Mérida", "Querétaro",
+    "San Luis Potosí", "Aguascalientes", "Hermosillo", "Saltillo", "Mexicali",
+    "Culiacán", "Guadalupe", "Acapulco", "Tlalnepantla", "Cancún"
+  ],
+  "aliases": {
+    "CDMX": "Ciudad de México",
+    "DF": "Ciudad de México",
+    "Mexico City": "Ciudad de México",
+    "MTY": "Monterrey",
+    "GDL": "Guadalajara",
+    "BCN": "Barcelona",
+    "MAD": "Madrid",
+    "Donostia": "San Sebastián"
+  }
+}
