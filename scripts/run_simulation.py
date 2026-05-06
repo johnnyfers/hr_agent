@@ -62,7 +62,7 @@ def _persona_reply(client: Anthropic, persona_prompt: str, transcript: list[dict
     """Have the candidate-Claude reply to the latest agent message."""
     messages = [{"role": m["role"], "content": m["content"]} for m in transcript]
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-haiku-4-5",
         max_tokens=200,
         system=persona_prompt,
         messages=messages,

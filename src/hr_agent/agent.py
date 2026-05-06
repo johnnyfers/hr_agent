@@ -57,8 +57,8 @@ from .validators import validate_field
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MODEL = os.environ.get("HR_AGENT_MODEL", "claude-sonnet-4-6")
-FALLBACK_MODEL = os.environ.get("HR_AGENT_FALLBACK_MODEL", "claude-haiku-4-5")
+DEFAULT_MODEL = os.environ.get("HR_AGENT_MODEL", "claude-haiku-4-5")
+FALLBACK_MODEL = os.environ.get("HR_AGENT_FALLBACK_MODEL", "claude-sonnet-4-6")
 MAX_TURN_ITERATIONS = 10  # safety cap on the tool-use loop within a single user turn
 MAX_PROVIDER_RETRIES = int(os.environ.get("HR_AGENT_PROVIDER_MAX_RETRIES", "4"))
 BACKOFF_BASE_SECONDS = float(os.environ.get("HR_AGENT_PROVIDER_BACKOFF_BASE", "1.0"))

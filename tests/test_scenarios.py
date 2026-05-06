@@ -135,7 +135,7 @@ def test_scenario_qualified_happy_path(grupo_sazon_spec):
         _StubResponse(content=[_text("¡Listo! Un reclutador te contactará en 48h.")]),
     ]
 
-    agent = ScreeningAgent(client=StubAnthropic(scripted), model="claude-sonnet-4-6")
+    agent = ScreeningAgent(client=StubAnthropic(scripted), model="claude-haiku-4-5")
     user_messages = [
         "Sí, tengo licencia",
         "Madrid",
@@ -176,7 +176,7 @@ def test_scenario_disqualified_no_license(grupo_sazon_spec):
         ),
         _StubResponse(content=[_text("Lo siento, el permiso es obligatorio. Te avisaremos si abrimos otros roles.")]),
     ]
-    agent = ScreeningAgent(client=StubAnthropic(scripted), model="claude-sonnet-4-6")
+    agent = ScreeningAgent(client=StubAnthropic(scripted), model="claude-haiku-4-5")
     agent.respond(conv, "no, no tengo", grupo_sazon_spec)
 
     assert conv.state.fields["has_license"] is False

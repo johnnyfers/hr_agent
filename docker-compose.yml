@@ -14,14 +14,14 @@ services:
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in .env or your shell}
       DATABASE_URL: postgresql://hr:hr@postgres:5432/hr_agent
-      HR_AGENT_MODEL: ${HR_AGENT_MODEL:-claude-sonnet-4-6}
+      HR_AGENT_MODEL: ${HR_AGENT_MODEL:-claude-haiku-4-5}
       HR_AGENT_LOG_LEVEL: ${HR_AGENT_LOG_LEVEL:-INFO}
     depends_on:
       postgres:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      test: [ "CMD", "curl", "-fsS", "http://localhost:8000/api/health" ]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -36,9 +36,9 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"   # exposed for local debugging; remove in shared envs
+      - "5432:5432" # exposed for local debugging; remove in shared envs
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hr -d hr_agent"]
+      test: [ "CMD-SHELL", "pg_isready -U hr -d hr_agent" ]
       interval: 5s
       timeout: 3s
       retries: 10
