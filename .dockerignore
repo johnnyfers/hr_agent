@@ -6,7 +6,6 @@ __pycache__
 .git
 .github
 *.db
-conversations/*.json
 .env
 *.md
 !README.md

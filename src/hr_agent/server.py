@@ -199,8 +199,7 @@ def _register_routes(app: FastAPI) -> None:
         summary = generate_summary(conv, job, client=app.state.client)
         conv.summary = summary
         storage.upsert_conversation(conv)
-        export_path = storage.export_json(conv_id)
-        return {"summary": summary, "export_path": str(export_path)}
+        return {"summary": summary}
 
     @app.get("/api/analytics")
     def get_analytics(job_id: Optional[str] = None):

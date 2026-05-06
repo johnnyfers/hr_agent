@@ -6,8 +6,6 @@ __pycache__/
 venv/
 .env
 *.db
-conversations/*.json
-!conversations/.gitkeep
 .DS_Store
 build/
 dist/

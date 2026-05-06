@@ -91,16 +91,6 @@ def test_list_filtered_by_job(tmp_storage):
     assert {r["id"] for r in acme_only} == {"c2"}
 
 
-def test_export_json(tmp_storage, tmp_path):
-    conv = Conversation(id="c1", state=_state(fields={"full_name": "Test User"}))
-    tmp_storage.upsert_conversation(conv)
-    tmp_storage.append_message("c1", Message(role="user", content="hi"))
-    path = tmp_storage.export_json("c1", out_dir=str(tmp_path))
-    assert path.exists()
-    data = path.read_text()
-    assert "Test User" in data and "hi" in data
-
-
 def test_get_missing_returns_none(tmp_storage):
     assert tmp_storage.get_conversation("nope") is None
     assert tmp_storage.get_job("nope/nope") is None

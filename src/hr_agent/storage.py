@@ -17,7 +17,6 @@ otherwise SQLite at ``HR_AGENT_DB_PATH``. Tests stay on SQLite.
 from __future__ import annotations
 
 import abc
-import json
 import logging
 import os
 import sqlite3
@@ -74,17 +73,6 @@ class Storage(abc.ABC):
 
     @abc.abstractmethod
     def list_jobs(self, client_id: Optional[str] = None) -> list[JobSpec]: ...
-
-    def export_json(self, conv_id: str, out_dir: str = "./conversations") -> Path:
-        """Dump a conversation to a single JSON file (recruiter-readable)."""
-        conv = self.get_conversation(conv_id)
-        if not conv:
-            raise KeyError(conv_id)
-        out_path = Path(out_dir) / f"{conv_id}.json"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with out_path.open("w") as f:
-            json.dump(conv.model_dump(mode="json"), f, indent=2, ensure_ascii=False)
-        return out_path
 
 
 def make_storage() -> Storage:

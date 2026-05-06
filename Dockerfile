@@ -35,7 +35,6 @@ COPY static ./static
 
 # Non-root user.
 RUN useradd --create-home --uid 1000 app \
- && mkdir -p /app/conversations \
  && chown -R app:app /app
 USER app
 
