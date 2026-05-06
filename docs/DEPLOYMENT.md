@@ -39,6 +39,29 @@ The shape that works at this scale:
 
 **What's removable.** Redis is optional until we're managing hot-deduplication of incoming WhatsApp webhooks. Object store is optional — Postgres can hold transcripts at this volume.
 
+## Caching analysis — do we need Redis?
+
+Short answer: **not yet for caching, but yes eventually for other reasons.** I added it to `docker-compose.yml` under the `cache` profile (off by default, started with `docker compose --profile cache up`) so the topology is ready when the use case is real.
+
+**Why caching is not the right framing today:**
+
+| Candidate for caching | Verdict |
+|---|---|
+| Anthropic API responses | **Already cached.** We use the SDK's `cache_control: ephemeral` on the system prompt. Caching is server-side at Anthropic; Redis would not help and would risk staleness. |
+| FAQ retrieval | 10 entries, in-memory dict scan, microseconds. Caching adds latency, not removes it. |
+| Service-area validation | 45 cities + aliases, in-memory. Same as above. |
+| Conversation reads | Postgres with the indexes we ship hits these in <2 ms at this volume. The bottleneck is the LLM (~1-3 s/turn), not the DB. |
+| Analytics aggregations | Compute-on-read across ≤1k rows takes <50 ms. If a recruiter dashboard later polls every 5 s, *then* a 30-second cache wrapper around `analytics.compute()` is a 5-line change — but not required today. |
+
+**When Redis earns its keep:**
+
+1. **Webhook dedupe.** WhatsApp/SMS gateways retry deliveries. `SETNX` with TTL is the canonical idempotency primitive for "have I already processed message id X". Required the day we plug into a real channel.
+2. **Per-candidate rate limiting.** A candidate hammering the chat (or a bug retrying on their side) needs a token bucket. Redis is the standard home.
+3. **Distributed lock for re-engagement scheduler.** Once we add the "ping after 30 min / 24 h / 72 h silence" job, multi-replica coordination needs a lock — Redis `SET NX EX` is sufficient.
+4. **Multi-instance session affinity** — only if we move conversation state out of Postgres into a hot store. Premature.
+
+**Decision:** ship the compose file with Redis defined-but-not-running. The day we wire WhatsApp, we flip the profile and add ~50 lines of dedupe/rate-limit code. We don't run a service today that does nothing.
+
 ## Stack choices
 
 | Concern | Choice | Why |

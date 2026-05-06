@@ -30,6 +30,24 @@ Built as a take-home assignment. Stack: Python · FastAPI · Anthropic Claude (S
 
 ## Run it
 
+### With Docker (recommended)
+
+```bash
+echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
+docker compose up --build         # app + postgres
+# open http://localhost:8000
+```
+
+The app talks to Postgres automatically (compose injects `DATABASE_URL`). Postgres data persists in a named volume; `docker compose down -v` wipes it.
+
+Optional: start Redis under a profile (not used by the app yet — see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#caching-analysis--do-we-need-redis) for the rationale):
+
+```bash
+docker compose --profile cache up
+```
+
+### Without Docker
+
 ```bash
 # Python 3.11+
 python -m venv .venv && source .venv/bin/activate
@@ -41,13 +59,39 @@ cp .env.example .env
 # Tests (no API key needed — LLM is stubbed):
 pytest -q
 
-# Server:
+# Server (defaults to SQLite at ./hr_agent.db):
 python -m hr_agent.server
 # open http://localhost:8000
 
 # End-to-end smoke test (uses real API, ~2-3¢):
 python scripts/run_simulation.py --persona qualified
 python scripts/run_simulation.py --persona all       # every persona
+```
+
+### Storage backends
+
+| Set | Effect |
+|---|---|
+| `DATABASE_URL=postgresql://...` | Use Postgres (psycopg3). Compose sets this automatically. |
+| (unset) | Fall back to SQLite at `HR_AGENT_DB_PATH` (defaults to `./hr_agent.db`). Tests always use SQLite. |
+
+**Schema migrations:** the app runs `CREATE TABLE IF NOT EXISTS` on boot, so a fresh DB is fully provisioned. **Schema *changes* are not migrated automatically** — if you upgrade across a schema bump and reuse the old volume, you'll see "column does not exist" errors at boot. For this take-home, drop the volume (`docker compose down -v`) when changing schema. For production this is where Alembic comes in (out of scope for this exercise).
+
+### Multi-client / multi-job
+
+The agent is job-agnostic. Each `(client, job)` pair is a row in the `jobs` table whose `spec_json` column holds a [JobSpec](src/hr_agent/jobspec.py) — the field list, validation rules, FAQ, and service-area whitelist. The default Grupo Sazón "delivery guy" job is seeded on startup from [src/hr_agent/data/seed/grupo-sazon-delivery-guy.json](src/hr_agent/data/seed/grupo-sazon-delivery-guy.json) (idempotent).
+
+To register another client/job, drop a JSON file alongside the seed file and restart, or upsert via storage. The agent's tools, prompts, and validators all derive from the JobSpec at runtime.
+
+```bash
+curl http://localhost:8000/api/clients                       # list clients
+curl http://localhost:8000/api/jobs                          # list all jobs
+curl http://localhost:8000/api/jobs/grupo-sazon/delivery-guy # one spec
+
+# Start a screening for a specific job:
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"job_id":"grupo-sazon/delivery-guy","language":"es"}' \
+  http://localhost:8000/api/conversations
 ```
 
 ### Endpoints

@@ -1,14 +1,18 @@
-"""LLM-driven screening agent.
+"""LLM-driven screening agent — JobSpec-aware.
 
-We use Anthropic's tool use to give the model deterministic operations
-(record_field, validate_city, lookup_faq, complete_screening). Everything
-that affects state goes through a tool — the model never silently mutates
-state in prose. This makes the system testable: we replay tool calls and
-assert state transitions, independent of natural-language phrasing.
+Tool definitions and dispatch are derived from a JobSpec each turn:
+- ``record_field`` accepts only fields named in the spec
+- ``validate_city`` is exposed only when the spec has a city field
+- ``lookup_faq`` searches the spec's FAQ
+- ``complete_screening`` records a final decision
 
-Prompt caching: the system prompt is the bulk of input tokens and is
-identical across turns within a conversation. We mark it as a cache
-breakpoint to keep per-turn costs low at scale.
+Every state mutation flows through ``dispatch_tool`` and through
+``validate_field`` from validators.py — the LLM proposes, validators dispose.
+This is what makes the system testable: we can replay tool calls and assert
+state transitions independent of natural-language phrasing.
+
+Prompt caching: the system prompt is the bulk of input tokens and identical
+across turns within a conversation; we mark it as a cache breakpoint.
 """
 
 from __future__ import annotations
@@ -20,120 +24,123 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from anthropic import Anthropic
-from anthropic.types import Message as AnthropicMessage
 
 from . import faq as faq_module
-from . import validators
-from .guardrails import GuardrailResult, check_user_input
+from .guardrails import check_user_input
+from .jobspec import JobSpec
 from .prompts import render_system_prompt
 from .schema import (
-    Availability,
     Conversation,
     Decision,
-    Experience,
     Message,
-    Schedule,
     ScreeningState,
-    Stage,
 )
+from .validators import validate_field
 
 log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = os.environ.get("HR_AGENT_MODEL", "claude-sonnet-4-6")
-MAX_TURN_ITERATIONS = 6  # safety cap on tool-use loop within a single user turn
+MAX_TURN_ITERATIONS = 6  # safety cap on the tool-use loop within a single user turn
 
 
-# --- Tool schemas -----------------------------------------------------------
+# --- Tool schemas (dynamic per JobSpec) ------------------------------------
 
-TOOLS: list[dict[str, Any]] = [
-    {
-        "name": "record_field",
-        "description": (
-            "Save one screening field after the candidate has given a clear answer. "
-            "Call this every time you confirm a piece of information — do not batch. "
-            "The validator will reject malformed values; you'll see the result and can re-ask."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "field": {
-                    "type": "string",
-                    "enum": [
-                        "has_license",
-                        "full_name",
-                        "availability",
-                        "preferred_schedule",
-                        "experience",
-                        "start_date",
-                        "language",
-                    ],
+
+def build_tools(job: JobSpec) -> list[dict[str, Any]]:
+    """Build the tool list scoped to ``job``.
+
+    The set of fields the model can record is exactly the spec's fields,
+    plus ``language`` for explicit ES/EN switches.
+    """
+    field_names = [f.name for f in job.fields] + ["language"]
+    field_descriptions = "\n".join(
+        f"  - {f.name} ({f.type}): {f.label.get('en') or f.label.get('es') or ''}"
+        for f in job.fields
+    )
+
+    tools: list[dict[str, Any]] = [
+        {
+            "name": "record_field",
+            "description": (
+                "Save one screening field after the candidate has given a clear answer. "
+                "Call this every time you confirm a piece of information — do not batch. "
+                "The validator will reject malformed values; you'll see the result and can re-ask.\n\n"
+                f"Fields for this job:\n{field_descriptions}\n  - language (string): 'es' or 'en'"
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "field": {"type": "string", "enum": field_names},
+                    "value": {
+                        "description": (
+                            "Scalar for bool/int/string/enum/date. "
+                            "For type=experience: {years: int, platforms: [str]}. "
+                            "For type=city: a single city/zone string."
+                        ),
+                    },
                 },
-                "value": {
-                    "description": (
-                        "For has_license: bool. For experience: an object {years: int, platforms: [str]}. "
-                        "For availability: one of full_time/part_time/weekends_only/flexible. "
-                        "For preferred_schedule: one of morning/afternoon/evening/night/flexible. "
-                        "For language: 'es' or 'en'. Otherwise free text."
-                    ),
-                },
+                "required": ["field", "value"],
             },
-            "required": ["field", "value"],
         },
-    },
-    {
-        "name": "validate_city",
-        "description": (
-            "Check whether a city or zone the candidate mentioned is in our service area. "
-            "Call this BEFORE confirming the city. Returns the canonical city name, country, "
-            "and whether it's served. If not served, the candidate is disqualified."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {"city": {"type": "string"}},
-            "required": ["city"],
-        },
-    },
-    {
-        "name": "lookup_faq",
-        "description": (
-            "Answer a candidate question about Grupo Sazón (pay, hours, vehicles, documents, process, etc.). "
-            "Returns the canonical FAQ answer or null if no good match. If null, tell the candidate "
-            "the recruiter will confirm that and continue with the screening — DO NOT make up an answer."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {"question": {"type": "string"}},
-            "required": ["question"],
-        },
-    },
-    {
-        "name": "complete_screening",
-        "description": (
-            "End the screening with a final decision. Call this exactly once when: "
-            "(a) the candidate has no licence, (b) their city is out of service area, "
-            "(c) all fields are collected and confirmed, or (d) the candidate is non-cooperative."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "decision": {
-                    "type": "string",
-                    "enum": [
-                        "qualified",
-                        "disqualified_no_license",
-                        "disqualified_out_of_zone",
-                        "needs_review",
-                    ],
-                },
-                "reason": {
-                    "type": "string",
-                    "description": "Brief recruiter-facing reason. 1 sentence.",
-                },
+        {
+            "name": "lookup_faq",
+            "description": (
+                "Answer a candidate question about the role/company (pay, hours, vehicles, documents, process, etc.). "
+                "Returns a canonical answer or null. If null, tell the candidate the recruiter will confirm — "
+                "do NOT make up an answer."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {"question": {"type": "string"}},
+                "required": ["question"],
             },
-            "required": ["decision", "reason"],
         },
-    },
-]
+        {
+            "name": "complete_screening",
+            "description": (
+                "End the screening with a final decision. Call this exactly once when: "
+                "(a) a disqualifying answer is given, (b) all fields are collected and confirmed, "
+                "or (c) the candidate is non-cooperative."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "decision": {
+                        "type": "string",
+                        "enum": ["qualified", "disqualified", "needs_review"],
+                    },
+                    "disqualifying_field": {
+                        "type": "string",
+                        "description": "Field name that triggered DQ. Required when decision=disqualified.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "1-sentence recruiter-facing reason.",
+                    },
+                },
+                "required": ["decision", "reason"],
+            },
+        },
+    ]
+
+    if job.has_city_field():
+        tools.append(
+            {
+                "name": "validate_city",
+                "description": (
+                    "Resolve a candidate-typed city to the canonical name and check it against the "
+                    "job's service area. Call this BEFORE confirming the city. If the city is not in "
+                    "the service area, end the screening with disqualified."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            }
+        )
+
+    return tools
 
 
 # --- Tool dispatch ----------------------------------------------------------
@@ -141,113 +148,71 @@ TOOLS: list[dict[str, Any]] = [
 
 @dataclass
 class ToolOutcome:
-    """Result of executing one tool call. Surfaced back to the model."""
-
     output: dict[str, Any]
     state_changed: bool = False
 
 
-def _record_field(state: ScreeningState, field: str, value: Any) -> ToolOutcome:
-    if field == "language":
+def _record_field(state: ScreeningState, job: JobSpec, name: str, value: Any) -> ToolOutcome:
+    if name == "language":
         if value in ("es", "en"):
             state.language = value
             return ToolOutcome({"ok": True, "field": "language", "value": value}, True)
         return ToolOutcome({"ok": False, "error": "language must be 'es' or 'en'"})
 
-    if field == "has_license":
-        v = validators.validate_license(value if isinstance(value, str) else str(value))
-        if v is None and isinstance(value, bool):
-            v = value
-        if v is None:
-            return ToolOutcome({"ok": False, "error": "ambiguous license value, re-ask"})
-        state.has_license = v
-        if state.stage == Stage.greet:
-            state.stage = Stage.license
-        if v is False:
-            return ToolOutcome(
-                {"ok": True, "field": "has_license", "value": False, "disqualifying": True}, True
-            )
-        return ToolOutcome({"ok": True, "field": "has_license", "value": True}, True)
+    field = job.field(name)
+    if field is None:
+        return ToolOutcome({"ok": False, "error": f"unknown field {name} for this job"})
 
-    if field == "full_name":
-        cleaned = validators.validate_name(str(value))
-        if not cleaned:
-            return ToolOutcome({"ok": False, "error": "invalid name (need first + last)"})
-        state.full_name = cleaned
-        state.stage = Stage.name
-        return ToolOutcome({"ok": True, "field": "full_name", "value": cleaned}, True)
+    result = validate_field(field, value, job)
+    if not result.ok:
+        return ToolOutcome({"ok": False, "error": result.error})
 
-    if field == "availability":
-        v = validators.validate_availability(str(value))
-        if v is None:
-            return ToolOutcome(
-                {
-                    "ok": False,
-                    "error": "must be one of full_time / part_time / weekends_only / flexible",
-                }
-            )
-        state.availability = v
-        state.stage = Stage.availability
-        return ToolOutcome({"ok": True, "field": "availability", "value": v.value}, True)
+    state.fields[name] = result.value
 
-    if field == "preferred_schedule":
-        v = validators.validate_schedule(str(value))
-        if v is None:
-            return ToolOutcome(
-                {
-                    "ok": False,
-                    "error": "must be one of morning / afternoon / evening / night / flexible",
-                }
-            )
-        state.preferred_schedule = v
-        state.stage = Stage.schedule
-        return ToolOutcome({"ok": True, "field": "preferred_schedule", "value": v.value}, True)
+    # Advance stage_index if this completes the next required field in order.
+    required = [f for f in job.fields if f.required]
+    state.stage_index = sum(1 for f in required if f.name in state.fields)
 
-    if field == "experience":
-        if not isinstance(value, dict):
-            return ToolOutcome({"ok": False, "error": "experience must be an object"})
-        years = validators.validate_experience_years(value.get("years"))
-        if years is None:
-            return ToolOutcome({"ok": False, "error": "invalid years (0-40)"})
-        platforms = validators.normalize_platforms(value.get("platforms") or [])
-        state.experience = Experience(years=years, platforms=platforms)
-        state.stage = Stage.experience
-        return ToolOutcome(
-            {"ok": True, "field": "experience", "value": {"years": years, "platforms": platforms}},
-            True,
-        )
-
-    if field == "start_date":
-        v = str(value).strip()
-        if not v or len(v) > 100:
-            return ToolOutcome({"ok": False, "error": "invalid start_date"})
-        state.start_date = v
-        state.stage = Stage.start_date
-        return ToolOutcome({"ok": True, "field": "start_date", "value": v}, True)
-
-    return ToolOutcome({"ok": False, "error": f"unknown field {field}"})
+    response: dict[str, Any] = {"ok": True, "field": name, "value": result.value}
+    if result.disqualifying:
+        state.disqualifying_field = name
+        state.decision_reason = result.reason
+        response["disqualifying"] = True
+        response["reason"] = result.reason
+    return ToolOutcome(response, True)
 
 
-def _validate_city(state: ScreeningState, city: str) -> ToolOutcome:
-    canonical, country, in_area = validators.validate_city(city)
-    state.city = canonical
-    state.country = country
-    state.city_in_service_area = in_area
-    if state.stage == Stage.license:
-        state.stage = Stage.location
-    return ToolOutcome(
-        {
-            "city": canonical,
-            "country": country,
-            "in_service_area": in_area,
-            "disqualifying": not in_area,
-        },
-        True,
-    )
+def _validate_city_tool(state: ScreeningState, job: JobSpec, city: str) -> ToolOutcome:
+    """Out-of-band city validation that *also* records the field.
+
+    The agent calls this before record_field to surface the in_service_area
+    check; we record at the same time so the model doesn't need two round-trips.
+    """
+    field = next((f for f in job.fields if f.type == "city"), None)
+    if field is None:
+        return ToolOutcome({"ok": False, "error": "this job has no city field"})
+
+    result = validate_field(field, city, job)
+    if not result.ok:
+        return ToolOutcome({"ok": False, "error": result.error})
+
+    state.fields[field.name] = result.value
+    rec = result.value or {}
+    response: dict[str, Any] = {
+        "city": rec.get("canonical") or rec.get("raw"),
+        "country": rec.get("country"),
+        "in_service_area": rec.get("in_service_area", False),
+        "disqualifying": result.disqualifying,
+    }
+    if result.disqualifying:
+        state.disqualifying_field = field.name
+        state.decision_reason = result.reason
+        response["reason"] = result.reason
+    return ToolOutcome(response, True)
 
 
-def _lookup_faq(state: ScreeningState, question: str) -> ToolOutcome:
-    result = faq_module.search(question, language=state.language)
+def _lookup_faq(state: ScreeningState, job: JobSpec, question: str) -> ToolOutcome:
+    result = faq_module.search(question, job.faq, language=state.language)
     if result is None:
         return ToolOutcome({"match": None, "hint": "no FAQ entry — punt to recruiter"})
     return ToolOutcome(
@@ -255,27 +220,40 @@ def _lookup_faq(state: ScreeningState, question: str) -> ToolOutcome:
     )
 
 
-def _complete_screening(state: ScreeningState, decision: str, reason: str) -> ToolOutcome:
+def _complete_screening(
+    state: ScreeningState,
+    decision: str,
+    reason: str,
+    disqualifying_field: Optional[str],
+) -> ToolOutcome:
     try:
         d = Decision(decision)
     except ValueError:
         return ToolOutcome({"ok": False, "error": f"unknown decision {decision}"})
+    if d not in (Decision.qualified, Decision.disqualified, Decision.needs_review):
+        return ToolOutcome({"ok": False, "error": f"invalid terminal decision {decision}"})
+
     state.decision = d
-    state.decision_reason = reason
-    if d == Decision.qualified:
-        state.stage = Stage.confirmed
+    state.decision_reason = reason or state.decision_reason
+    if d == Decision.disqualified and disqualifying_field:
+        state.disqualifying_field = disqualifying_field
     return ToolOutcome({"ok": True, "decision": d.value}, True)
 
 
-def dispatch_tool(state: ScreeningState, name: str, arguments: dict) -> ToolOutcome:
+def dispatch_tool(state: ScreeningState, job: JobSpec, name: str, arguments: dict) -> ToolOutcome:
     if name == "record_field":
-        return _record_field(state, arguments["field"], arguments["value"])
+        return _record_field(state, job, arguments["field"], arguments["value"])
     if name == "validate_city":
-        return _validate_city(state, arguments["city"])
+        return _validate_city_tool(state, job, arguments["city"])
     if name == "lookup_faq":
-        return _lookup_faq(state, arguments["question"])
+        return _lookup_faq(state, job, arguments["question"])
     if name == "complete_screening":
-        return _complete_screening(state, arguments["decision"], arguments["reason"])
+        return _complete_screening(
+            state,
+            arguments.get("decision", ""),
+            arguments.get("reason", ""),
+            arguments.get("disqualifying_field"),
+        )
     return ToolOutcome({"ok": False, "error": f"unknown tool {name}"})
 
 
@@ -284,26 +262,28 @@ def dispatch_tool(state: ScreeningState, name: str, arguments: dict) -> ToolOutc
 
 @dataclass
 class AgentTurn:
-    """Output of one user→assistant turn."""
-
     assistant_text: str
     state: ScreeningState
-    tool_calls: list[dict]  # for analytics/debugging
+    tool_calls: list[dict]
     guardrail_flag: Optional[str]
 
 
 class ScreeningAgent:
-    """Runs one Anthropic message loop per user turn, dispatching tools."""
+    """Runs one Anthropic message loop per user turn. Stateless w.r.t. job."""
 
     def __init__(self, client: Optional[Anthropic] = None, model: str = DEFAULT_MODEL):
         self.client = client or Anthropic()
         self.model = model
 
-    def respond(self, conversation: Conversation, user_message: str) -> AgentTurn:
-        """Process one user message and return the assistant reply."""
+    def respond(
+        self,
+        conversation: Conversation,
+        user_message: str,
+        job: JobSpec,
+    ) -> AgentTurn:
+        """Process one user message in the context of ``job``."""
         guard = check_user_input(user_message)
         if not guard.allowed:
-            # Empty / rejected message — bounce a generic re-prompt without LLM.
             return AgentTurn(
                 assistant_text=_fallback_reprompt(conversation.state.language),
                 state=conversation.state,
@@ -315,47 +295,37 @@ class ScreeningAgent:
         if guard.flag:
             log.info("guardrail flagged user message: %s — %s", guard.flag, guard.note)
 
-        # Append the user message to the on-record history before the LLM call.
         conversation.messages.append(Message(role="user", content=cleaned))
-
-        # Build the message list for Anthropic from our history.
         anthropic_messages = _to_anthropic_messages(conversation.messages)
+        tools = build_tools(job)
 
         tool_calls_log: list[dict] = []
         assistant_text = ""
 
-        for iteration in range(MAX_TURN_ITERATIONS):
-            system = render_system_prompt(conversation.state, guardrail_flag=guard.flag)
+        for _ in range(MAX_TURN_ITERATIONS):
+            system = render_system_prompt(job, conversation.state, guardrail_flag=guard.flag)
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=1024,
                 system=[
-                    {
-                        "type": "text",
-                        "text": system,
-                        "cache_control": {"type": "ephemeral"},
-                    }
+                    {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
                 ],
                 messages=anthropic_messages,
-                tools=TOOLS,
+                tools=tools,
             )
 
-            # Collect any tool calls in this response and execute them.
             tool_uses = [b for b in response.content if b.type == "tool_use"]
             text_parts = [b.text for b in response.content if b.type == "text"]
             assistant_text = "\n".join(t for t in text_parts if t).strip()
 
             if not tool_uses:
-                # Plain text reply — turn is done.
                 break
 
-            # Append the assistant turn (including tool_use blocks) to messages.
             anthropic_messages.append({"role": "assistant", "content": response.content})
 
-            # Dispatch each tool, build tool_result blocks for the next call.
             tool_results = []
             for tu in tool_uses:
-                outcome = dispatch_tool(conversation.state, tu.name, tu.input)
+                outcome = dispatch_tool(conversation.state, job, tu.name, tu.input)
                 tool_calls_log.append(
                     {"name": tu.name, "input": tu.input, "output": outcome.output}
                 )
@@ -386,16 +356,7 @@ class ScreeningAgent:
 
 
 def _to_anthropic_messages(messages: list[Message]) -> list[dict]:
-    """Convert our stored messages into the Anthropic chat format.
-
-    We persist plain user/assistant text only — tool_use/tool_result blocks
-    are ephemeral within a turn loop and don't need to survive turns.
-    """
-    out = []
-    for m in messages:
-        if m.role in ("user", "assistant"):
-            out.append({"role": m.role, "content": m.content})
-    return out
+    return [{"role": m.role, "content": m.content} for m in messages if m.role in ("user", "assistant")]
 
 
 def _fallback_reprompt(language: str) -> str:
@@ -407,31 +368,36 @@ def _fallback_reprompt(language: str) -> str:
 # --- Initial greeting -------------------------------------------------------
 
 
-def initial_greeting(language: str = "es") -> str:
-    """The very first agent message — no LLM call needed."""
+def initial_greeting(job: JobSpec, language: str = "es") -> str:
+    """First agent message — no LLM call. Pulled from the JobSpec."""
+    title = job.title.get(language) or job.title.get("es") or ""
+    first_field = job.fields[0] if job.fields else None
+    first_q = ""
+    if first_field:
+        first_q = first_field.prompt_hint.get(language) or first_field.prompt_hint.get("es") or ""
+
     if language == "en":
         return (
-            "Hi! I'm Grupo Sazón's screening assistant — quick chat to see if the "
-            "delivery driver role is a fit. To start: do you have a valid driver's licence?"
-        )
+            f"Hi! I'm {job.client.name}'s screening assistant — quick chat to see if the "
+            f"{title} role is a fit. {first_q}"
+        ).strip()
     return (
-        "¡Hola! Soy el asistente de Grupo Sazón. Te haré unas preguntas rápidas para "
-        "ver si el puesto de repartidor encaja. Para empezar, ¿tienes permiso de "
-        "conducir vigente?"
-    )
+        f"¡Hola! Soy el asistente de {job.client.name}. Te haré unas preguntas rápidas para "
+        f"ver si el puesto de {title} encaja. {first_q}"
+    ).strip()
 
 
 # --- Summary generation -----------------------------------------------------
 
 
-def generate_summary(conversation: Conversation, client: Optional[Anthropic] = None, model: str = DEFAULT_MODEL) -> str:
-    """Produce a recruiter-facing summary using the LLM.
-
-    Falls back to a deterministic summary if the LLM call fails — recruiters
-    always get something, even if the API is down.
-    """
-    state = conversation.state
-    deterministic = _deterministic_summary(state)
+def generate_summary(
+    conversation: Conversation,
+    job: JobSpec,
+    client: Optional[Anthropic] = None,
+    model: str = DEFAULT_MODEL,
+) -> str:
+    """Recruiter-facing summary. Falls back to deterministic if LLM fails."""
+    deterministic = _deterministic_summary(conversation.state, job)
 
     if client is None:
         try:
@@ -443,18 +409,18 @@ def generate_summary(conversation: Conversation, client: Optional[Anthropic] = N
         f"{m.role}: {m.content}" for m in conversation.messages if m.role in ("user", "assistant")
     )[-4000:]
 
-    prompt = f"""You are summarising a delivery-driver screening for a recruiter at Grupo Sazón.
+    prompt = f"""You are summarising a screening for a recruiter at {job.client.name} ({job.title.get('en') or job.title.get('es')}).
 
 Output strict JSON:
 {{
-  "headline": "1-line tl;dr (e.g. '5y experienced driver, full-time, Madrid, can start immediately')",
+  "headline": "1-line tl;dr",
   "highlights": ["3-5 short bullets of positive signals"],
   "concerns": ["any red/yellow flags — empty list if none"]
 }}
 
-Decision: {state.decision.value}
-Decision reason: {state.decision_reason or '-'}
-Collected: {state.model_dump_json(exclude={'decision', 'decision_reason', 'needs_review_fields'})}
+Decision: {conversation.state.decision.value}
+Decision reason: {conversation.state.decision_reason or '-'}
+Collected fields: {json.dumps(conversation.state.fields, ensure_ascii=False)}
 
 Transcript (last 4k chars):
 {transcript}
@@ -466,7 +432,6 @@ Transcript (last 4k chars):
             messages=[{"role": "user", "content": prompt}],
         )
         text = "".join(b.text for b in response.content if b.type == "text").strip()
-        # Strip markdown code fences if present.
         if text.startswith("```"):
             text = text.strip("`")
             if text.startswith("json"):
@@ -483,26 +448,24 @@ Transcript (last 4k chars):
         return deterministic
 
 
-def _deterministic_summary(state: ScreeningState) -> str:
+def _deterministic_summary(state: ScreeningState, job: JobSpec) -> str:
     parts = [f"Decision: **{state.decision.value}**"]
     if state.decision_reason:
         parts.append(f"Reason: {state.decision_reason}")
-    if state.full_name:
-        parts.append(f"Name: {state.full_name}")
-    if state.city:
-        parts.append(
-            f"Location: {state.city} ({state.country or '?'}) — "
-            f"{'in service area' if state.city_in_service_area else 'OUT OF SERVICE AREA'}"
-        )
-    if state.has_license is not None:
-        parts.append(f"Licence: {'yes' if state.has_license else 'no'}")
-    if state.availability:
-        parts.append(f"Availability: {state.availability.value}")
-    if state.preferred_schedule:
-        parts.append(f"Schedule: {state.preferred_schedule.value}")
-    if state.experience:
-        plats = ", ".join(state.experience.platforms) or "no platforms specified"
-        parts.append(f"Experience: {state.experience.years}y ({plats})")
-    if state.start_date:
-        parts.append(f"Start: {state.start_date}")
+    if state.disqualifying_field:
+        parts.append(f"DQ field: {state.disqualifying_field}")
+    for f in job.fields:
+        v = state.fields.get(f.name)
+        if v is None:
+            continue
+        if isinstance(v, dict) and "in_service_area" in v:
+            parts.append(
+                f"{f.name}: {v.get('canonical') or v.get('raw')} ({v.get('country') or '?'}) — "
+                f"{'in service area' if v.get('in_service_area') else 'OUT OF SERVICE AREA'}"
+            )
+        elif isinstance(v, dict) and "years" in v:
+            plats = ", ".join(v.get("platforms") or []) or "no platforms specified"
+            parts.append(f"{f.name}: {v['years']}y ({plats})")
+        else:
+            parts.append(f"{f.name}: {v}")
     return "\n".join(f"- {p}" for p in parts)

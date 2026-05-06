@@ -1,12 +1,15 @@
 """FastAPI surface — REST endpoints for chat + a minimal browser UI.
 
 Endpoints:
-- POST /api/conversations            → start a new screening
-- POST /api/conversations/{id}/turn  → send a user message, get a reply
-- GET  /api/conversations/{id}       → fetch full state + transcript
-- POST /api/conversations/{id}/summary → generate recruiter summary
-- GET  /api/analytics                → funnel metrics
-- GET  /                              → static chat UI
+- GET  /api/clients                              → list registered clients
+- GET  /api/jobs                                 → list registered jobs
+- GET  /api/jobs/{job_id:path}                   → fetch one JobSpec
+- POST /api/conversations                        → start a screening (body: job_id, language)
+- POST /api/conversations/{id}/turn              → send a user message
+- GET  /api/conversations/{id}                   → fetch state + transcript
+- POST /api/conversations/{id}/summary           → generate recruiter summary
+- GET  /api/analytics                            → funnel metrics (?job_id= optional)
+- GET  /                                         → static chat UI
 """
 
 from __future__ import annotations
@@ -33,7 +36,8 @@ except ImportError:
 from . import analytics
 from .agent import ScreeningAgent, generate_summary, initial_greeting
 from .schema import Conversation, Message, ScreeningState
-from .storage import Storage
+from .seed import DEFAULT_JOB_ID, ensure_default
+from .storage import Storage, make_storage
 
 log = logging.getLogger(__name__)
 logging.basicConfig(
@@ -42,15 +46,18 @@ logging.basicConfig(
 )
 
 
-# --- App lifecycle ----------------------------------------------------------
-
-
 def _build_app(storage: Optional[Storage] = None, agent: Optional[ScreeningAgent] = None) -> FastAPI:
     """Factory so tests can inject in-memory dependencies."""
-    app = FastAPI(title="Grupo Sazón Screening Agent", version="0.1.0")
-    app.state.storage = storage or Storage()
+    app = FastAPI(title="Multi-tenant Screening Agent", version="0.2.0")
+    app.state.storage = storage or make_storage()
     app.state.client = Anthropic() if os.environ.get("ANTHROPIC_API_KEY") else None
     app.state.agent = agent or (ScreeningAgent(client=app.state.client) if app.state.client else None)
+
+    # Seed default clients + jobs (idempotent).
+    try:
+        ensure_default(app.state.storage)
+    except Exception as e:
+        log.exception("failed to seed default jobs: %s", e)
 
     static_dir = Path(__file__).parent.parent.parent / "static"
     if static_dir.exists():
@@ -70,10 +77,12 @@ def _build_app(storage: Optional[Storage] = None, agent: Optional[ScreeningAgent
 class StartRequest(BaseModel):
     candidate_id: Optional[str] = None
     language: str = "es"
+    job_id: str = DEFAULT_JOB_ID
 
 
 class StartResponse(BaseModel):
     conversation_id: str
+    job_id: str
     greeting: str
 
 
@@ -94,12 +103,45 @@ class TurnResponse(BaseModel):
 def _register_routes(app: FastAPI) -> None:
     storage: Storage = app.state.storage
 
+    @app.get("/api/clients")
+    def list_clients():
+        return [c.model_dump() for c in storage.list_clients()]
+
+    @app.get("/api/jobs")
+    def list_jobs(client_id: Optional[str] = None):
+        jobs = storage.list_jobs(client_id=client_id)
+        return [
+            {
+                "job_id": j.job_id,
+                "client": j.client.model_dump(),
+                "title": j.title,
+                "description": j.description,
+                "languages": j.languages,
+                "field_count": len(j.fields),
+            }
+            for j in jobs
+        ]
+
+    @app.get("/api/jobs/{job_id:path}")
+    def get_job(job_id: str):
+        job = storage.get_job(job_id)
+        if not job:
+            raise HTTPException(404, "job not found")
+        return job.model_dump()
+
     @app.post("/api/conversations", response_model=StartResponse)
     def start(req: StartRequest):
-        lang = req.language if req.language in ("es", "en") else "es"
+        job = storage.get_job(req.job_id)
+        if not job:
+            raise HTTPException(404, f"job not found: {req.job_id}")
+        lang = req.language if req.language in job.languages else job.default_language
         conv_id = str(uuid.uuid4())
-        state = ScreeningState(language=lang)
-        greeting = initial_greeting(lang)
+        state = ScreeningState(
+            job_id=job.job_id,
+            client_id=job.client.id,
+            language=lang,
+        )
+        greeting = initial_greeting(job, lang)
         conv = Conversation(
             id=conv_id,
             candidate_id=req.candidate_id,
@@ -109,7 +151,7 @@ def _register_routes(app: FastAPI) -> None:
         storage.upsert_conversation(conv)
         for m in conv.messages:
             storage.append_message(conv_id, m)
-        return StartResponse(conversation_id=conv_id, greeting=greeting)
+        return StartResponse(conversation_id=conv_id, job_id=job.job_id, greeting=greeting)
 
     @app.post("/api/conversations/{conv_id}/turn", response_model=TurnResponse)
     def turn(conv_id: str, req: TurnRequest):
@@ -121,11 +163,13 @@ def _register_routes(app: FastAPI) -> None:
         if app.state.agent is None:
             raise HTTPException(503, "agent not configured (missing ANTHROPIC_API_KEY)")
 
-        # Snapshot pre-turn message count so we know what's new.
-        pre_count = len(conv.messages)
-        result = app.state.agent.respond(conv, req.message)
+        job = storage.get_job(conv.state.job_id)
+        if not job:
+            raise HTTPException(500, f"job spec missing for {conv.state.job_id}")
 
-        # Persist new messages (user + assistant) and the updated state.
+        pre_count = len(conv.messages)
+        result = app.state.agent.respond(conv, req.message, job)
+
         for m in conv.messages[pre_count:]:
             storage.append_message(conv_id, m)
         storage.upsert_conversation(conv)
@@ -149,18 +193,22 @@ def _register_routes(app: FastAPI) -> None:
         conv = storage.get_conversation(conv_id)
         if not conv:
             raise HTTPException(404, "conversation not found")
-        summary = generate_summary(conv, client=app.state.client)
+        job = storage.get_job(conv.state.job_id)
+        if not job:
+            raise HTTPException(500, f"job spec missing for {conv.state.job_id}")
+        summary = generate_summary(conv, job, client=app.state.client)
         conv.summary = summary
         storage.upsert_conversation(conv)
         export_path = storage.export_json(conv_id)
         return {"summary": summary, "export_path": str(export_path)}
 
     @app.get("/api/analytics")
-    def get_analytics():
-        m = analytics.compute(storage)
+    def get_analytics(job_id: Optional[str] = None):
+        m = analytics.compute(storage, job_id=job_id)
         return {
             "metrics": m.__dict__,
             "stage_drop_off_table": analytics.stage_drop_off_table(m),
+            "scoped_to_job": job_id,
         }
 
     @app.get("/api/health")

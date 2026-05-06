@@ -1,51 +1,83 @@
 from datetime import datetime, timedelta, timezone
 
 from hr_agent import analytics
-from hr_agent.schema import Conversation, Decision, Message, ScreeningState, Stage
+from hr_agent.jobspec import Client
+from hr_agent.schema import Conversation, Decision, Message, ScreeningState
 
 
-def _conv(id_, decision, stage=Stage.greet, msg_count=4, duration_s=60):
-    state = ScreeningState(decision=decision, stage=stage)
+JOB_ID = "grupo-sazon/delivery-guy"
+CLIENT_ID = "grupo-sazon"
+
+
+def _conv(id_, decision, stage_index=0, msg_count=4, duration_s=60, job_id=JOB_ID):
+    state = ScreeningState(
+        job_id=job_id,
+        client_id=CLIENT_ID,
+        decision=decision,
+        stage_index=stage_index,
+    )
     base = datetime.now(timezone.utc)
+    step = duration_s / max(msg_count - 1, 1)
     messages = [
-        Message(role="user" if i % 2 else "assistant", content=f"m{i}", timestamp=base + timedelta(seconds=i * (duration_s / max(msg_count - 1, 1))))
+        Message(
+            role="user" if i % 2 else "assistant",
+            content=f"m{i}",
+            timestamp=base + timedelta(seconds=i * step),
+        )
         for i in range(msg_count)
     ]
     return Conversation(id=id_, state=state, messages=messages)
 
 
-def test_compute_basic_funnel(tmp_storage):
-    storage = tmp_storage
-    storage.upsert_conversation(_conv("a", Decision.qualified))
-    for m in storage.get_conversation("a").messages:
-        storage.append_message("a", m)
-    storage.upsert_conversation(_conv("b", Decision.disqualified_no_license))
-    for m in storage.get_conversation("b").messages:
-        storage.append_message("b", m)
-    storage.upsert_conversation(_conv("c", Decision.in_progress, stage=Stage.location))
-    for m in storage.get_conversation("c").messages:
-        storage.append_message("c", m)
+def _save(storage, conv):
+    storage.upsert_conversation(conv)
+    for m in conv.messages:
+        storage.append_message(conv.id, m)
 
-    m = analytics.compute(storage)
+
+def test_compute_basic_funnel(tmp_storage):
+    _save(tmp_storage, _conv("a", Decision.qualified))
+    _save(tmp_storage, _conv("b", Decision.disqualified))
+    _save(tmp_storage, _conv("c", Decision.in_progress, stage_index=2))
+
+    m = analytics.compute(tmp_storage)
     assert m.total == 3
     assert m.qualified == 1
-    assert m.disqualified_no_license == 1
+    assert m.disqualified == 1
     assert m.in_progress == 1
     assert m.completion_rate == round(2 / 3, 3)
     assert m.qualification_rate == 0.5  # 1 qualified / 2 completed
 
 
 def test_drop_off_by_stage(tmp_storage):
-    storage = tmp_storage
-    storage.upsert_conversation(_conv("a", Decision.in_progress, stage=Stage.location))
-    storage.upsert_conversation(_conv("b", Decision.in_progress, stage=Stage.availability))
-    storage.upsert_conversation(_conv("c", Decision.in_progress, stage=Stage.location))
+    _save(tmp_storage, _conv("a", Decision.in_progress, stage_index=2))
+    _save(tmp_storage, _conv("b", Decision.in_progress, stage_index=4))
+    _save(tmp_storage, _conv("c", Decision.in_progress, stage_index=2))
 
-    m = analytics.compute(storage)
+    m = analytics.compute(tmp_storage)
     table = analytics.stage_drop_off_table(m)
     rendered = dict(table)
-    assert rendered.get("2_location") == 2
-    assert rendered.get("4_availability") == 1
+    assert rendered.get(f"stage_2:{JOB_ID}") == 2
+    assert rendered.get(f"stage_4:{JOB_ID}") == 1
+
+
+def test_segments_by_job(tmp_storage):
+    """job_id filter scopes the funnel to one job."""
+    # Add a second job/client in storage so we can prove scoping.
+    tmp_storage.upsert_client(Client(id="acme", name="Acme"))
+    other = tmp_storage.get_job(JOB_ID).model_copy(update={
+        "job_id": "acme/courier",
+        "client": Client(id="acme", name="Acme"),
+    })
+    tmp_storage.upsert_job(other)
+
+    _save(tmp_storage, _conv("a", Decision.qualified))
+    _save(tmp_storage, _conv("b", Decision.qualified, job_id="acme/courier"))
+
+    sazon = analytics.compute(tmp_storage, job_id=JOB_ID)
+    acme = analytics.compute(tmp_storage, job_id="acme/courier")
+    assert sazon.total == 1 and sazon.qualified == 1
+    assert acme.total == 1 and acme.qualified == 1
 
 
 def test_empty_storage(tmp_storage):

@@ -1,0 +1,69 @@
+# Local-dev / single-host deployment for the screening agent.
+#
+#   docker compose up                       # app + postgres
+#   docker compose --profile cache up       # also start redis (see DEPLOYMENT.md)
+#   docker compose down -v                  # tear down + drop volumes
+#
+# Set ANTHROPIC_API_KEY in your shell or a .env file in this directory.
+
+services:
+  app:
+    build: .
+    image: hr-agent:local
+    ports:
+      - "8000:8000"
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in .env or your shell}
+      DATABASE_URL: postgresql://hr:hr@postgres:5432/hr_agent
+      HR_AGENT_MODEL: ${HR_AGENT_MODEL:-claude-sonnet-4-6}
+      HR_AGENT_LOG_LEVEL: ${HR_AGENT_LOG_LEVEL:-INFO}
+      # Uncomment when redis profile is active:
+      # REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hr
+      POSTGRES_PASSWORD: hr
+      POSTGRES_DB: hr_agent
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"   # exposed for local debugging; remove in shared envs
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hr -d hr_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # Redis is OFF by default — see docs/DEPLOYMENT.md "Caching analysis".
+  # Enable with: docker compose --profile cache up
+  redis:
+    image: redis:7-alpine
+    profiles: ["cache"]
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:

@@ -1,95 +1,58 @@
-"""Pydantic models for screening state and persistence."""
+"""Conversation + screening state.
+
+The state shape is now job-agnostic: ``fields`` is a dict keyed by
+``FieldSpec.name`` (defined in the JobSpec). The agent and validators read
+the JobSpec to know what's required and how to validate.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
-
-
-class Availability(str, Enum):
-    full_time = "full_time"
-    part_time = "part_time"
-    weekends_only = "weekends_only"
-    flexible = "flexible"
-
-
-class Schedule(str, Enum):
-    morning = "morning"
-    afternoon = "afternoon"
-    evening = "evening"
-    night = "night"
-    flexible = "flexible"
 
 
 class Decision(str, Enum):
     in_progress = "in_progress"
     qualified = "qualified"
-    disqualified_no_license = "disqualified_no_license"
-    disqualified_out_of_zone = "disqualified_out_of_zone"
+    disqualified = "disqualified"
     needs_review = "needs_review"
     dropped_off = "dropped_off"
 
 
-class Stage(str, Enum):
-    """Tracks the highest-numbered stage reached, for analytics drop-off."""
-
-    greet = "0_greet"
-    license = "1_license"
-    location = "2_location"
-    name = "3_name"
-    availability = "4_availability"
-    schedule = "5_schedule"
-    experience = "6_experience"
-    start_date = "7_start_date"
-    confirmed = "8_confirmed"
-
-
-class Experience(BaseModel):
-    years: int = Field(ge=0, le=40)
-    platforms: list[str] = Field(default_factory=list)
-
-
 class ScreeningState(BaseModel):
-    """The structured data we extract from the conversation.
+    """Per-conversation state.
 
-    All fields are optional until set. Disqualifying fields short-circuit
-    further collection; the agent stops asking and moves to closure.
+    ``fields`` holds whatever values the JobSpec asked for, validated. The
+    agent never reads ``fields`` directly to decide what to do next — it
+    re-reads the JobSpec and consults ``fields`` for "is this set yet?".
     """
 
-    full_name: Optional[str] = None
-    has_license: Optional[bool] = None
-    city: Optional[str] = None
-    country: Optional[Literal["ES", "MX"]] = None
-    city_in_service_area: Optional[bool] = None
-    availability: Optional[Availability] = None
-    preferred_schedule: Optional[Schedule] = None
-    experience: Optional[Experience] = None
-    start_date: Optional[str] = None  # free-text, normalized later
+    job_id: str
+    client_id: str
+    language: str = "es"
+
+    # Field name → validated value. Shape per type:
+    #   bool/string/int/date/enum  → the scalar value
+    #   city                        → {"raw": str, "canonical": str|None,
+    #                                  "country": str|None,
+    #                                  "in_service_area": bool}
+    #   experience                  → {"years": int, "platforms": list[str]}
+    fields: dict[str, Any] = Field(default_factory=dict)
 
     decision: Decision = Decision.in_progress
     decision_reason: Optional[str] = None
+    disqualifying_field: Optional[str] = None  # name of the field that triggered DQ
     needs_review_fields: list[str] = Field(default_factory=list)
-    stage: Stage = Stage.greet
-    language: Literal["es", "en"] = "es"
 
-    def required_remaining(self) -> list[str]:
-        """Names of required fields still unset, in stage order."""
-        order = [
-            ("has_license", self.has_license is None),
-            ("city", self.city is None),
-            ("full_name", self.full_name is None),
-            ("availability", self.availability is None),
-            ("preferred_schedule", self.preferred_schedule is None),
-            ("experience", self.experience is None),
-            ("start_date", self.start_date is None),
-        ]
-        return [name for name, missing in order if missing]
+    # Index of the next required field in JobSpec.fields. Drives the
+    # drop-off-by-stage analytic and lets the prompt show progress.
+    stage_index: int = 0
 
     def is_complete(self) -> bool:
-        return self.decision != Decision.in_progress or not self.required_remaining()
+        return self.decision != Decision.in_progress
 
 
 class Message(BaseModel):
@@ -101,20 +64,8 @@ class Message(BaseModel):
 class Conversation(BaseModel):
     id: str
     candidate_id: Optional[str] = None
-    state: ScreeningState = Field(default_factory=ScreeningState)
+    state: ScreeningState
     messages: list[Message] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     summary: Optional[str] = None
-
-
-class ConversationSummary(BaseModel):
-    """What we hand to the recruiter."""
-
-    conversation_id: str
-    decision: Decision
-    decision_reason: Optional[str]
-    candidate: ScreeningState
-    highlights: list[str]
-    concerns: list[str]
-    created_at: datetime

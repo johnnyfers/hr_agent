@@ -35,7 +35,8 @@ from anthropic import Anthropic
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from hr_agent.agent import ScreeningAgent, generate_summary, initial_greeting  # noqa: E402
-from hr_agent.schema import Conversation, Decision, Message, ScreeningState  # noqa: E402
+from hr_agent.schema import Conversation, Message, ScreeningState  # noqa: E402
+from hr_agent.seed import _load_seeds  # noqa: E402
 
 
 PERSONAS = {
@@ -75,8 +76,13 @@ def run_one(persona_key: str, max_turns: int = 12) -> Conversation:
     client = Anthropic()
     agent = ScreeningAgent(client=client)
 
-    conv = Conversation(id=str(uuid.uuid4()), state=ScreeningState(language="en" if persona_key == "english" else "es"))
-    greeting = initial_greeting(conv.state.language)
+    job = next(s for s in _load_seeds() if s.job_id == "grupo-sazon/delivery-guy")
+    language = "en" if persona_key == "english" else "es"
+    conv = Conversation(
+        id=str(uuid.uuid4()),
+        state=ScreeningState(job_id=job.job_id, client_id=job.client.id, language=language),
+    )
+    greeting = initial_greeting(job, language)
     conv.messages.append(Message(role="assistant", content=greeting))
 
     print(f"\n=== persona: {persona_key} ===")
@@ -99,7 +105,7 @@ def run_one(persona_key: str, max_turns: int = 12) -> Conversation:
         candidate_reply = _persona_reply(client, persona, persona_transcript)
         print(f"candidate: {candidate_reply}")
 
-        result = agent.respond(conv, candidate_reply)
+        result = agent.respond(conv, candidate_reply, job)
         print(f"agent: {result.assistant_text}")
         if result.tool_calls:
             for tc in result.tool_calls:
@@ -111,8 +117,10 @@ def run_one(persona_key: str, max_turns: int = 12) -> Conversation:
     print(f"\n--- final state ---")
     print(f"decision: {conv.state.decision.value}")
     print(f"reason:   {conv.state.decision_reason}")
+    if conv.state.disqualifying_field:
+        print(f"DQ field: {conv.state.disqualifying_field}")
 
-    summary = generate_summary(conv, client=client)
+    summary = generate_summary(conv, job, client=client)
     conv.summary = summary
     print(f"\n--- summary ---\n{summary}\n")
 

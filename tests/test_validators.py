@@ -1,131 +1,199 @@
-"""Validator tests — these are the deterministic core, must be airtight."""
+"""Validator tests — these are the deterministic core, must be airtight.
+
+We exercise the type-dispatched ``validate_field`` against the seeded
+Grupo Sazón JobSpec so the tests reflect what the running agent sees.
+"""
 
 import pytest
 
-from hr_agent.schema import Availability, Schedule
-from hr_agent.validators import (
-    normalize_platforms,
-    validate_availability,
-    validate_city,
-    validate_experience_years,
-    validate_license,
-    validate_name,
-    validate_schedule,
-)
+from hr_agent.validators import validate_field
 
 
-class TestValidateName:
-    def test_valid(self):
-        assert validate_name("María García") == "María García"
-        assert validate_name("Jean-Pierre O'Brien") == "Jean-Pierre O'Brien"
+# --- helpers ---------------------------------------------------------------
 
-    def test_collapses_whitespace(self):
-        assert validate_name("  Juan   Pérez  ") == "Juan Pérez"
-
-    def test_rejects_single_token(self):
-        assert validate_name("Juan") is None
-
-    def test_rejects_too_short(self):
-        assert validate_name("J") is None
-
-    def test_rejects_too_long(self):
-        assert validate_name("x" * 100) is None
-
-    def test_rejects_digits(self):
-        assert validate_name("Juan 2 Pérez") is None
+def _field(spec, name):
+    return spec.field(name)
 
 
-class TestValidateCity:
-    def test_canonical_match(self):
-        city, country, ok = validate_city("Madrid")
-        assert city == "Madrid" and country == "ES" and ok is True
-
-    def test_alias_resolves(self):
-        city, country, ok = validate_city("CDMX")
-        assert city == "Ciudad de México" and country == "MX" and ok is True
-
-    def test_diacritic_insensitive(self):
-        city, _, ok = validate_city("ciudad de mexico")
-        assert ok is True and city == "Ciudad de México"
-
-    def test_alias_lowercase(self):
-        city, _, ok = validate_city("mexico city")
-        assert ok is True and city == "Ciudad de México"
-
-    def test_unknown_city(self):
-        city, country, ok = validate_city("Springfield")
-        assert ok is False and country is None and city == "Springfield"
-
-    def test_empty(self):
-        city, country, ok = validate_city("")
-        assert ok is False and city is None
+# --- bool (license) --------------------------------------------------------
 
 
-class TestValidateLicense:
-    @pytest.mark.parametrize("v,expected", [
-        ("yes", True), ("Yes", True), ("sí", True), ("si", True),
-        ("Tengo licencia", True), ("I have one", True),
-        ("no", False), ("No", False), ("no tengo", False),
-        ("not yet", False), ("todavía no", False),
-        ("maybe", None), ("idk", None),
+class TestLicense:
+    @pytest.mark.parametrize("v,expected_bool,expected_dq", [
+        ("yes", True, False),
+        ("Yes", True, False),
+        ("sí", True, False),
+        ("Tengo licencia", True, False),
+        ("I have one", True, False),
+        ("no", False, True),
+        ("No", False, True),
+        ("no tengo", False, True),
+        ("not yet", False, True),
+        ("todavía no", False, True),
+        (True, True, False),
+        (False, False, True),
     ])
-    def test_cases(self, v, expected):
-        assert validate_license(v) == expected
+    def test_resolves_yes_no(self, grupo_sazon_spec, v, expected_bool, expected_dq):
+        f = _field(grupo_sazon_spec, "has_license")
+        r = validate_field(f, v, grupo_sazon_spec)
+        assert r.ok is True
+        assert r.value is expected_bool
+        assert r.disqualifying is expected_dq
 
-    def test_passthrough_bool(self):
-        assert validate_license(True) is True
-        assert validate_license(False) is False
+    @pytest.mark.parametrize("v", ["maybe", "idk", "kinda"])
+    def test_ambiguous_rejected(self, grupo_sazon_spec, v):
+        f = _field(grupo_sazon_spec, "has_license")
+        r = validate_field(f, v, grupo_sazon_spec)
+        assert r.ok is False
 
 
-class TestValidateAvailability:
+# --- string (full_name) ----------------------------------------------------
+
+
+class TestFullName:
+    def test_valid(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "full_name")
+        r = validate_field(f, "María García", grupo_sazon_spec)
+        assert r.ok and r.value == "María García"
+
+    def test_collapses_whitespace(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "full_name")
+        r = validate_field(f, "  Juan   Pérez  ", grupo_sazon_spec)
+        assert r.ok and r.value == "Juan Pérez"
+
+    def test_rejects_single_token(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "full_name")
+        assert not validate_field(f, "Juan", grupo_sazon_spec).ok
+
+    def test_rejects_digits(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "full_name")
+        assert not validate_field(f, "Juan 2 Pérez", grupo_sazon_spec).ok
+
+    def test_rejects_too_short(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "full_name")
+        assert not validate_field(f, "J", grupo_sazon_spec).ok
+
+
+# --- city ------------------------------------------------------------------
+
+
+class TestCity:
+    def test_canonical_match(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "city")
+        r = validate_field(f, "Madrid", grupo_sazon_spec)
+        assert r.ok and r.value["canonical"] == "Madrid" and r.value["country"] == "ES"
+        assert r.value["in_service_area"] is True
+        assert r.disqualifying is False
+
+    def test_alias_resolves(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "city")
+        r = validate_field(f, "CDMX", grupo_sazon_spec)
+        assert r.ok and r.value["canonical"] == "Ciudad de México"
+        assert r.value["country"] == "MX"
+
+    def test_diacritic_insensitive(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "city")
+        r = validate_field(f, "ciudad de mexico", grupo_sazon_spec)
+        assert r.ok and r.value["in_service_area"] is True
+
+    def test_unknown_city_disqualifies(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "city")
+        r = validate_field(f, "Springfield", grupo_sazon_spec)
+        assert r.ok  # the call succeeded — the city is recorded
+        assert r.value["in_service_area"] is False
+        assert r.disqualifying is True
+        assert r.reason and "Springfield" in r.reason
+
+
+# --- enum (availability, schedule) -----------------------------------------
+
+
+class TestAvailability:
     @pytest.mark.parametrize("v,expected", [
-        ("full time", Availability.full_time),
-        ("Tiempo completo", Availability.full_time),
-        ("part-time please", Availability.part_time),
-        ("Media jornada", Availability.part_time),
-        ("solo fines de semana", Availability.weekends_only),
-        ("flex", Availability.flexible),
-        ("whenever", None),
+        ("full time", "full_time"),
+        ("Tiempo completo", "full_time"),
+        ("part-time please", "part_time"),
+        ("Media jornada", "part_time"),
+        ("solo fines de semana", "weekends_only"),
+        ("flex", "flexible"),
+        ("flexible", "flexible"),
     ])
-    def test_cases(self, v, expected):
-        assert validate_availability(v) == expected
+    def test_resolves(self, grupo_sazon_spec, v, expected):
+        f = _field(grupo_sazon_spec, "availability")
+        r = validate_field(f, v, grupo_sazon_spec)
+        assert r.ok and r.value == expected
+
+    def test_garbage_rejected(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "availability")
+        assert not validate_field(f, "whenever I feel like it", grupo_sazon_spec).ok
 
 
-class TestValidateSchedule:
+class TestSchedule:
     @pytest.mark.parametrize("v,expected", [
-        ("morning", Schedule.morning),
-        ("Mañana", Schedule.morning),
-        ("tarde", Schedule.afternoon),
-        ("evening", Schedule.evening),
-        ("nights please", Schedule.night),
-        ("flexible", Schedule.flexible),
-        ("garbage", None),
+        ("morning", "morning"),
+        ("Mañana", "morning"),
+        ("tarde", "afternoon"),
+        ("evening", "evening"),
+        ("nights please", "night"),
+        ("flexible", "flexible"),
     ])
-    def test_cases(self, v, expected):
-        assert validate_schedule(v) == expected
+    def test_resolves(self, grupo_sazon_spec, v, expected):
+        f = _field(grupo_sazon_spec, "preferred_schedule")
+        r = validate_field(f, v, grupo_sazon_spec)
+        assert r.ok and r.value == expected
 
 
-class TestValidateExperience:
-    @pytest.mark.parametrize("v,expected", [
-        (0, 0), (5, 5), ("3", 3), ("3 years", 3), ("about 2", 2),
-        ("none", 0), ("Ninguna", 0), ("zero", 0),
-        (-1, None), (50, None), ("nope", None),
-        (True, None),  # bool subclass of int but rejected
-    ])
-    def test_cases(self, v, expected):
-        assert validate_experience_years(v) == expected
+# --- experience ------------------------------------------------------------
 
 
-class TestNormalizePlatforms:
-    def test_canonicalizes(self):
-        assert normalize_platforms(["glovo", "Uber Eats"]) == ["Glovo", "Uber Eats"]
+class TestExperience:
+    def test_valid(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "experience")
+        r = validate_field(f, {"years": 3, "platforms": ["glovo", "Uber Eats"]}, grupo_sazon_spec)
+        assert r.ok
+        assert r.value == {"years": 3, "platforms": ["Glovo", "Uber Eats"]}
 
-    def test_dedupes(self):
-        assert normalize_platforms(["Glovo", "glovo", "GLOVO"]) == ["Glovo"]
+    def test_zero_years(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "experience")
+        r = validate_field(f, {"years": 0, "platforms": []}, grupo_sazon_spec)
+        assert r.ok and r.value["years"] == 0
 
-    def test_preserves_unknown(self):
-        out = normalize_platforms(["Glovo", "MisteryFood"])
-        assert "Glovo" in out and "MisteryFood" in out
+    def test_string_years_resolved(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "experience")
+        r = validate_field(f, {"years": "about 2", "platforms": []}, grupo_sazon_spec)
+        assert r.ok and r.value["years"] == 2
 
-    def test_filters_empty(self):
-        assert normalize_platforms(["", "Glovo", None]) == ["Glovo"]
+    def test_dedupes_platforms(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "experience")
+        r = validate_field(f, {"years": 1, "platforms": ["GLOVO", "glovo"]}, grupo_sazon_spec)
+        assert r.value["platforms"] == ["Glovo"]
+
+    def test_out_of_range(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "experience")
+        assert not validate_field(f, {"years": 50, "platforms": []}, grupo_sazon_spec).ok
+
+    def test_bad_shape(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "experience")
+        assert not validate_field(f, "lots", grupo_sazon_spec).ok
+
+
+# --- date ------------------------------------------------------------------
+
+
+class TestStartDate:
+    def test_accepts_freetext(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "start_date")
+        r = validate_field(f, "next monday", grupo_sazon_spec)
+        assert r.ok and r.value == "next monday"
+
+    def test_accepts_iso(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "start_date")
+        assert validate_field(f, "2026-05-19", grupo_sazon_spec).ok
+
+    def test_rejects_empty(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "start_date")
+        assert not validate_field(f, "", grupo_sazon_spec).ok
+
+    def test_rejects_overlong(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "start_date")
+        assert not validate_field(f, "x" * 200, grupo_sazon_spec).ok

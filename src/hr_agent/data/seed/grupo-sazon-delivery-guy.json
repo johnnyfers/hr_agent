@@ -1,0 +1,199 @@
+{
+  "spec_version": 1,
+  "client": {
+    "id": "grupo-sazon",
+    "name": "Grupo Sazón"
+  },
+  "job_id": "grupo-sazon/delivery-guy",
+  "title": {
+    "es": "Repartidor",
+    "en": "Delivery driver"
+  },
+  "description": "Delivery driver role at Grupo Sazón restaurant chain. Dummy seed description — replace with the real job ad copy when launching.",
+  "languages": ["es", "en"],
+  "default_language": "es",
+  "tone_notes": "Friendly-professional. Spanish defaults to tú; switch to usted only if candidate clearly does first.",
+  "company_blurb": {
+    "es": "Grupo Sazón es una cadena de restaurantes con 45 locales en España y México. Estamos creciendo nuestro equipo de reparto.",
+    "en": "Grupo Sazón is a restaurant chain with 45 locations across Spain and Mexico. We're growing our delivery team."
+  },
+  "fields": [
+    {
+      "name": "has_license",
+      "type": "bool",
+      "required": true,
+      "disqualify_when": "false",
+      "label": { "es": "Permiso de conducir", "en": "Driver's licence" },
+      "prompt_hint": {
+        "es": "¿Tienes permiso de conducir vigente?",
+        "en": "Do you have a valid driver's licence?"
+      }
+    },
+    {
+      "name": "city",
+      "type": "city",
+      "required": true,
+      "disqualify_when": "out_of_service_area",
+      "label": { "es": "Ciudad", "en": "City" },
+      "prompt_hint": { "es": "¿En qué ciudad estás?", "en": "What city are you in?" }
+    },
+    {
+      "name": "full_name",
+      "type": "string",
+      "required": true,
+      "label": { "es": "Nombre completo", "en": "Full name" },
+      "prompt_hint": {
+        "es": "¿Cómo te llamas? (nombre y apellido)",
+        "en": "What's your full name?"
+      }
+    },
+    {
+      "name": "availability",
+      "type": "enum",
+      "enum_values": ["full_time", "part_time", "weekends_only", "flexible"],
+      "required": true,
+      "label": { "es": "Disponibilidad", "en": "Availability" },
+      "prompt_hint": {
+        "es": "¿Tiempo completo, parcial, fines de semana o flexible?",
+        "en": "Full-time, part-time, weekends or flexible?"
+      }
+    },
+    {
+      "name": "preferred_schedule",
+      "type": "enum",
+      "enum_values": ["morning", "afternoon", "evening", "night", "flexible"],
+      "required": true,
+      "label": { "es": "Turno preferido", "en": "Preferred schedule" },
+      "prompt_hint": {
+        "es": "¿Mañana, tarde, noche o flexible?",
+        "en": "Morning, afternoon, evening or flexible?"
+      }
+    },
+    {
+      "name": "experience",
+      "type": "experience",
+      "required": true,
+      "label": { "es": "Experiencia en reparto", "en": "Delivery experience" },
+      "prompt_hint": {
+        "es": "¿Cuántos años de experiencia y en qué apps (Glovo, Uber Eats, etc.)?",
+        "en": "How many years of experience and on which platforms (Glovo, Uber Eats, etc.)?"
+      }
+    },
+    {
+      "name": "start_date",
+      "type": "date",
+      "required": true,
+      "label": { "es": "Fecha de inicio", "en": "Start date" },
+      "prompt_hint": { "es": "¿Cuándo podrías empezar?", "en": "When could you start?" }
+    }
+  ],
+  "service_areas": {
+    "countries": {
+      "ES": [
+        "Madrid", "Barcelona", "Valencia", "Sevilla", "Zaragoza",
+        "Málaga", "Murcia", "Palma", "Las Palmas de Gran Canaria", "Bilbao",
+        "Alicante", "Córdoba", "Valladolid", "Vigo", "Gijón",
+        "Granada", "A Coruña", "Vitoria-Gasteiz", "Elche", "Oviedo",
+        "Santa Cruz de Tenerife", "Pamplona", "Almería", "San Sebastián", "Burgos"
+      ],
+      "MX": [
+        "Ciudad de México", "Guadalajara", "Monterrey", "Puebla", "Tijuana",
+        "León", "Juárez", "Zapopan", "Mérida", "Querétaro",
+        "San Luis Potosí", "Aguascalientes", "Hermosillo", "Saltillo", "Mexicali",
+        "Culiacán", "Guadalupe", "Acapulco", "Tlalnepantla", "Cancún"
+      ]
+    },
+    "aliases": {
+      "CDMX": "Ciudad de México",
+      "DF": "Ciudad de México",
+      "Mexico City": "Ciudad de México",
+      "MTY": "Monterrey",
+      "GDL": "Guadalajara",
+      "BCN": "Barcelona",
+      "MAD": "Madrid",
+      "Donostia": "San Sebastián"
+    }
+  },
+  "faq": [
+    {
+      "id": "pay",
+      "tags": ["salary", "pay", "sueldo", "salario", "cuánto pagan", "earnings"],
+      "text": {
+        "es": "El pago base es de 9-12€/hora en España y 75-95 MXN/hora en México, más propinas y bonos por entregas completadas. El detalle exacto lo confirma el reclutador según ubicación y horario.",
+        "en": "Base pay is €9-12/hour in Spain and 75-95 MXN/hour in Mexico, plus tips and per-delivery bonuses. The recruiter confirms exact figures based on location and shift."
+      }
+    },
+    {
+      "id": "vehicle",
+      "tags": ["vehicle", "moto", "coche", "bike", "bicicleta", "car", "scooter", "what do I need"],
+      "text": {
+        "es": "Aceptamos moto, scooter, coche o bicicleta eléctrica. El vehículo es propio del repartidor. Cubrimos parte del combustible/mantenimiento mediante un bono mensual.",
+        "en": "We accept motorbike, scooter, car, or e-bike. The driver provides their own vehicle. We cover part of fuel/maintenance via a monthly stipend."
+      }
+    },
+    {
+      "id": "schedule",
+      "tags": ["hours", "horario", "shifts", "turnos", "weekends", "fines de semana"],
+      "text": {
+        "es": "Hay turnos de mañana, tarde y noche, todos los días de la semana. El mínimo son 15 horas semanales y el máximo 40. Los fines de semana son los turnos más demandados.",
+        "en": "We have morning, afternoon, and evening shifts, every day of the week. Minimum is 15 hours per week and maximum 40. Weekends are the busiest shifts."
+      }
+    },
+    {
+      "id": "experience",
+      "tags": ["experience", "experiencia", "first job", "sin experiencia", "no experience"],
+      "text": {
+        "es": "No es obligatorio tener experiencia previa en reparto, pero ayuda. Damos formación inicial de 2 horas y acompañamiento la primera semana.",
+        "en": "Prior delivery experience isn't required but helps. We give 2 hours of initial training and shadow you during your first week."
+      }
+    },
+    {
+      "id": "documents",
+      "tags": ["documents", "papers", "documentación", "permiso", "license", "licencia"],
+      "text": {
+        "es": "Necesitas: permiso de conducir válido, identificación oficial, y derecho a trabajar en el país. Para vehículos de motor, también el permiso de circulación y seguro al día.",
+        "en": "You need: a valid driver's license, official ID, and the right to work in the country. For motor vehicles, also vehicle registration and current insurance."
+      }
+    },
+    {
+      "id": "process",
+      "tags": ["process", "next steps", "proceso", "siguientes pasos", "after this", "qué sigue"],
+      "text": {
+        "es": "Después de esta conversación, si tu perfil encaja, un reclutador te contacta en 24-48 horas para una entrevista corta y prueba de conducción. Inicio típico en 1-2 semanas tras aceptar la oferta.",
+        "en": "After this chat, if you're a fit, a recruiter contacts you within 24-48 hours for a short interview and a driving check. Typical start is 1-2 weeks after accepting the offer."
+      }
+    },
+    {
+      "id": "payment_frequency",
+      "tags": ["when do I get paid", "cuándo cobro", "weekly", "semanal", "biweekly", "quincenal"],
+      "text": {
+        "es": "El pago es semanal en España (cada viernes) y quincenal en México (los días 15 y último de cada mes).",
+        "en": "Pay is weekly in Spain (every Friday) and biweekly in Mexico (on the 15th and last day of each month)."
+      }
+    },
+    {
+      "id": "uniform",
+      "tags": ["uniform", "uniforme", "what to wear", "ropa"],
+      "text": {
+        "es": "Te damos camiseta y mochila térmica el primer día. El resto de ropa es libre, mientras sea adecuada para conducir.",
+        "en": "We provide a t-shirt and thermal backpack on day one. The rest is up to you, as long as it's appropriate for driving."
+      }
+    },
+    {
+      "id": "languages",
+      "tags": ["language", "idioma", "do I need to speak"],
+      "text": {
+        "es": "Es suficiente con hablar español. El inglés es un plus pero no obligatorio.",
+        "en": "Spanish is enough. English is a plus but not required."
+      }
+    },
+    {
+      "id": "age",
+      "tags": ["age", "edad", "minimum age", "how old"],
+      "text": {
+        "es": "La edad mínima es 18 años en ambos países.",
+        "en": "Minimum age is 18 in both countries."
+      }
+    }
+  ]
+}
