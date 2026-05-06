@@ -146,6 +146,39 @@
     0%, 100% { opacity: 1; }
     50% { opacity: 0.6; }
   }
+  .suggestions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 16px 10px 16px;
+    background: #fafafa;
+    border-top: 1px solid var(--border);
+    align-items: center;
+  }
+  .suggestions .label {
+    font-size: 12px;
+    color: var(--muted);
+    margin-right: 4px;
+  }
+  .suggestions button {
+    border: 1px solid var(--border);
+    background: #fff;
+    color: var(--text);
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 14px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .suggestions button:hover {
+    background: var(--primary);
+    color: #fff;
+    border-color: var(--primary);
+  }
+  .suggestions button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
   .summary-panel {
     border-top: 2px solid var(--primary);
     background: #fff8f6;
@@ -186,6 +219,7 @@
     <button id="show-state">Ver estado</button>
   </div>
   <div class="messages" id="messages"></div>
+  <div class="suggestions" id="suggestions"></div>
   <form id="chat-form" autocomplete="off">
     <input type="text" id="input" placeholder="Escribe tu respuesta…" required />
     <button type="button" class="voice-btn" id="voice-btn" title="Voz (browser STT)">🎤</button>
@@ -207,6 +241,7 @@ const headerH1 = document.querySelector("header h1");
 const langLabel = document.querySelector(".controls label");
 const restartBtn = el("restart");
 const showStateBtn = el("show-state");
+const suggestionsEl = el("suggestions");
 
 const I18N = {
   es: {
@@ -223,6 +258,13 @@ const I18N = {
       "Cambiar idioma reiniciará la conversación. ¿Continuar?",
     voiceTitle: "Activar voz (un mensaje)",
     voiceTitleStop: "Detener grabación",
+    suggestionsLabel: "💬 Pregúntame sobre…",
+    suggestions: [
+      "¿Cuánto pagan?",
+      "¿Necesito mi propia moto?",
+      "¿Qué documentos necesito?",
+      "¿Cuáles son los turnos?",
+    ],
   },
   en: {
     title: "Grupo Sazón — Drivers",
@@ -238,6 +280,13 @@ const I18N = {
       "Changing language will start a new conversation. Continue?",
     voiceTitle: "Tap to talk (one message)",
     voiceTitleStop: "Stop recording",
+    suggestionsLabel: "💬 Ask me about…",
+    suggestions: [
+      "How much do you pay?",
+      "Do I need my own vehicle?",
+      "What documents do I need?",
+      "What are the shifts?",
+    ],
   },
 };
 
@@ -257,6 +306,26 @@ function applyLang() {
   voiceBtn.title = voiceBtn.classList.contains("listening")
     ? tr.voiceTitleStop
     : tr.voiceTitle;
+  renderSuggestions();
+}
+
+function renderSuggestions() {
+  const tr = t();
+  suggestionsEl.innerHTML = "";
+  const label = document.createElement("span");
+  label.className = "label";
+  label.textContent = tr.suggestionsLabel;
+  suggestionsEl.appendChild(label);
+  for (const q of tr.suggestions) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = q;
+    btn.disabled = done || !conversationId;
+    btn.addEventListener("click", () => {
+      if (!done && conversationId) sendMessage(q);
+    });
+    suggestionsEl.appendChild(btn);
+  }
 }
 
 let conversationId = null;
@@ -314,6 +383,7 @@ async function startConversation() {
   conversationId = data.conversation_id;
   statusEl.textContent = `id: ${conversationId.slice(0, 8)}…`;
   addMessage("assistant", data.greeting);
+  renderSuggestions();
 }
 
 async function sendMessage(text) {
@@ -344,6 +414,7 @@ async function sendMessage(text) {
       done = true;
       inputEl.disabled = true;
       sendBtn.disabled = true;
+      renderSuggestions();
       await fetchSummary(data.state);
     }
   } catch (e) {
