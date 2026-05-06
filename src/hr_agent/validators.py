@@ -414,7 +414,9 @@ def _validate_date(field: FieldSpec, value: Any) -> ValidationResult:
             return ValidationResult(ok=False, error="date is in the past")
         return ValidationResult(ok=True, value=d.isoformat())
 
-    # Next weekday: "next monday", "proximo lunes".
+    # Weekday forms:
+    # - "next monday", "proximo lunes"
+    # - "el lunes", "this monday", "este lunes"
     weekday_map = {
         "monday": 0,
         "lunes": 0,
@@ -433,6 +435,17 @@ def _validate_date(field: FieldSpec, value: Any) -> ValidationResult:
     }
     m = re.search(
         r"^(?:next|proximo|proxima)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|lunes|martes|miercoles|jueves|viernes|sabado|domingo)$",
+        norm,
+    )
+    if m:
+        target = weekday_map[m.group(1)]
+        delta = (target - today.weekday()) % 7
+        if delta == 0:
+            delta = 7
+        return ValidationResult(ok=True, value=(today + timedelta(days=delta)).isoformat())
+
+    m = re.search(
+        r"^(?:el|this|este|esta)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|lunes|martes|miercoles|jueves|viernes|sabado|domingo)$",
         norm,
     )
     if m:

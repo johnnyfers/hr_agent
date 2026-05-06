@@ -386,6 +386,10 @@ class ScreeningAgent:
         if guard.flag:
             log.info("guardrail flagged user message: %s — %s", guard.flag, guard.note)
 
+        lang_hint = _detect_language_hint(cleaned)
+        if lang_hint and lang_hint != conversation.state.language:
+            conversation.state.language = lang_hint
+
         conversation.messages.append(Message(role="user", content=cleaned))
         anthropic_messages = _to_anthropic_messages(conversation.messages)
         tools = build_tools(job)
@@ -446,6 +450,53 @@ class ScreeningAgent:
 
 def _to_anthropic_messages(messages: list[Message]) -> list[dict]:
     return [{"role": m.role, "content": m.content} for m in messages if m.role in ("user", "assistant")]
+
+
+def _detect_language_hint(text: str) -> Optional[str]:
+    """Best-effort language hint from latest user message (es/en)."""
+    t = text.lower()
+    es_markers = {
+        "hola",
+        "gracias",
+        "mañana",
+        "manana",
+        "lunes",
+        "martes",
+        "miercoles",
+        "jueves",
+        "viernes",
+        "sabado",
+        "domingo",
+        "puedo",
+        "empezar",
+        "si",
+        "sí",
+        "tengo",
+    }
+    en_markers = {
+        "hello",
+        "thanks",
+        "tomorrow",
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+        "i can",
+        "i could",
+        "start",
+        "yes",
+        "have",
+    }
+    es_score = sum(1 for w in es_markers if w in t)
+    en_score = sum(1 for w in en_markers if w in t)
+    if es_score > en_score:
+        return "es"
+    if en_score > es_score:
+        return "en"
+    return None
 
 
 def _fallback_reprompt(language: str) -> str:

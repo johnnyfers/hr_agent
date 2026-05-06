@@ -208,6 +208,13 @@ class TestStartDate:
         parsed = datetime.strptime(r.value, "%Y-%m-%d").date()
         assert parsed > datetime.now(timezone.utc).date()
 
+    def test_accepts_spanish_article_weekday(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "start_date")
+        r = validate_field(f, "el lunes", grupo_sazon_spec)
+        assert r.ok
+        parsed = datetime.strptime(r.value, "%Y-%m-%d").date()
+        assert parsed > datetime.now(timezone.utc).date()
+
     def test_accepts_spanish_month_name_format(self, grupo_sazon_spec):
         f = _field(grupo_sazon_spec, "start_date")
         r = validate_field(f, "7 de mayo", grupo_sazon_spec)
