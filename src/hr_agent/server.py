@@ -46,6 +46,30 @@ logging.basicConfig(
 )
 
 
+def _find_static_dir() -> Optional[Path]:
+    """Locate the static/ directory across install layouts.
+
+    - editable/source: server.py at src/hr_agent/server.py → ../../static
+    - Docker (non-editable install): server.py is in site-packages but the
+      Dockerfile copies static to /app/static and runs uvicorn from /app
+    - explicit override: HR_AGENT_STATIC_DIR
+    """
+    override = os.environ.get("HR_AGENT_STATIC_DIR")
+    if override:
+        p = Path(override)
+        return p if p.exists() else None
+
+    candidates = [
+        Path(__file__).resolve().parent.parent.parent / "static",  # src layout
+        Path.cwd() / "static",                                      # Docker WORKDIR
+        Path("/app/static"),                                        # Docker explicit
+    ]
+    for c in candidates:
+        if c.exists() and (c / "index.html").exists():
+            return c
+    return None
+
+
 def _build_app(storage: Optional[Storage] = None, agent: Optional[ScreeningAgent] = None) -> FastAPI:
     """Factory so tests can inject in-memory dependencies."""
     app = FastAPI(title="Multi-tenant Screening Agent", version="0.2.0")
@@ -59,13 +83,15 @@ def _build_app(storage: Optional[Storage] = None, agent: Optional[ScreeningAgent
     except Exception as e:
         log.exception("failed to seed default jobs: %s", e)
 
-    static_dir = Path(__file__).parent.parent.parent / "static"
-    if static_dir.exists():
+    static_dir = _find_static_dir()
+    if static_dir is not None:
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
         @app.get("/")
         def root():
             return FileResponse(str(static_dir / "index.html"))
+    else:
+        log.warning("static UI directory not found — chat UI disabled")
 
     _register_routes(app)
     return app
