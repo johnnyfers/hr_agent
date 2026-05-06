@@ -121,8 +121,27 @@
   }
   button[type=submit]:hover, .voice-btn:hover { background: var(--primary-dark); }
   button[type=submit]:disabled { background: #ccc; cursor: not-allowed; }
-  .voice-btn { border-left: 1px solid var(--primary-dark); padding: 0 14px; }
-  .voice-btn.listening { background: #e74c3c; animation: pulse 1.2s infinite; }
+  .voice-btn {
+    border-left: 1px solid var(--primary-dark);
+    padding: 0 14px;
+    position: relative;
+  }
+  .voice-btn.listening {
+    background: #e74c3c;
+    animation: pulse 1.2s infinite;
+    box-shadow: 0 0 0 3px rgba(231, 76, 60, 0.35);
+  }
+  .voice-btn.listening::after {
+    content: "● REC";
+    position: absolute;
+    bottom: -18px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    color: #e74c3c;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
   @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.6; }
@@ -184,10 +203,68 @@ const statusEl = el("status");
 const langEl = el("lang");
 const summaryEl = el("summary");
 const voiceBtn = el("voice-btn");
+const headerH1 = document.querySelector("header h1");
+const langLabel = document.querySelector(".controls label");
+const restartBtn = el("restart");
+const showStateBtn = el("show-state");
+
+const I18N = {
+  es: {
+    title: "Grupo Sazón — Repartidores",
+    langLabel: "Idioma:",
+    restart: "↻ Nueva conversación",
+    showState: "Ver estado",
+    inputPlaceholder: "Escribe tu respuesta…",
+    sendBtn: "Enviar",
+    summaryHeader: "Resumen para reclutador",
+    statusConnecting: "conectando…",
+    statusError: "error iniciando",
+    confirmLangSwitch:
+      "Cambiar idioma reiniciará la conversación. ¿Continuar?",
+    voiceTitle: "Activar voz (un mensaje)",
+    voiceTitleStop: "Detener grabación",
+  },
+  en: {
+    title: "Grupo Sazón — Drivers",
+    langLabel: "Language:",
+    restart: "↻ New conversation",
+    showState: "View state",
+    inputPlaceholder: "Type your reply…",
+    sendBtn: "Send",
+    summaryHeader: "Recruiter summary",
+    statusConnecting: "connecting…",
+    statusError: "failed to start",
+    confirmLangSwitch:
+      "Changing language will start a new conversation. Continue?",
+    voiceTitle: "Tap to talk (one message)",
+    voiceTitleStop: "Stop recording",
+  },
+};
+
+function t() {
+  return I18N[langEl.value] || I18N.es;
+}
+
+function applyLang() {
+  const tr = t();
+  document.documentElement.lang = langEl.value;
+  headerH1.textContent = tr.title;
+  langLabel.textContent = tr.langLabel;
+  restartBtn.textContent = tr.restart;
+  showStateBtn.textContent = tr.showState;
+  inputEl.placeholder = tr.inputPlaceholder;
+  sendBtn.textContent = tr.sendBtn;
+  voiceBtn.title = voiceBtn.classList.contains("listening")
+    ? tr.voiceTitleStop
+    : tr.voiceTitle;
+}
 
 let conversationId = null;
 let done = false;
-let voiceOutput = false;
+// True only for the next assistant reply — set when the user submits via mic,
+// cleared after the reply is spoken (or on error). Prevents the bug where every
+// reply was spoken forever after a single mic click.
+let speakNextReply = false;
 
 function addMessage(role, text) {
   const div = document.createElement("div");
@@ -195,7 +272,10 @@ function addMessage(role, text) {
   div.textContent = text;
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
-  if (role === "assistant" && voiceOutput) speak(text);
+  if (role === "assistant" && speakNextReply) {
+    speak(text);
+    speakNextReply = false;
+  }
 }
 
 function showTyping() {
@@ -213,17 +293,21 @@ function clearTyping() {
 
 async function startConversation() {
   done = false;
+  speakNextReply = false;
+  if (window.speechSynthesis) speechSynthesis.cancel();
   summaryEl.style.display = "none";
   messagesEl.innerHTML = "";
   inputEl.disabled = false;
   sendBtn.disabled = false;
+  applyLang();
+  statusEl.textContent = t().statusConnecting;
   const res = await fetch("/api/conversations", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ language: langEl.value }),
   });
   if (!res.ok) {
-    statusEl.textContent = "error iniciando";
+    statusEl.textContent = t().statusError;
     return;
   }
   const data = await res.json();
@@ -281,7 +365,7 @@ async function fetchSummary(state) {
   else if (state.decision.startsWith("disqualified")) badgeClass = "decision-disqualified";
   summaryEl.style.display = "block";
   summaryEl.innerHTML =
-    `<h3>Resumen para reclutador <span class="decision-badge ${badgeClass}">${state.decision}</span></h3>` +
+    `<h3>${t().summaryHeader} <span class="decision-badge ${badgeClass}">${state.decision}</span></h3>` +
     `<div></div>`;
   summaryEl.querySelector("div").textContent = data.summary;
 }
@@ -292,16 +376,35 @@ el("chat-form").addEventListener("submit", (e) => {
   if (text) sendMessage(text);
 });
 
-el("restart").addEventListener("click", startConversation);
+restartBtn.addEventListener("click", startConversation);
 
-el("show-state").addEventListener("click", async () => {
+showStateBtn.addEventListener("click", async () => {
   if (!conversationId) return;
   const res = await fetch(`/api/conversations/${conversationId}`);
   const data = await res.json();
   alert(JSON.stringify(data.state, null, 2));
 });
 
-// Browser-based voice (Web Speech API). Free, works in Chrome/Edge.
+// Language dropdown: pre-conversation it just relabels the UI; mid-conversation
+// changing it is meaningless without restarting (the agent's language was set
+// at conversation start and the running screening would speak the old one), so
+// we confirm + restart and revert the dropdown if the user cancels.
+let prevLang = langEl.value;
+langEl.addEventListener("change", () => {
+  const newLang = langEl.value;
+  if (newLang === prevLang) return;
+  if (conversationId && !done) {
+    if (!confirm(I18N[newLang].confirmLangSwitch)) {
+      langEl.value = prevLang;
+      return;
+    }
+  }
+  prevLang = newLang;
+  applyLang();
+  startConversation();
+});
+
+// Browser-based voice (Web Speech API). Works in Chrome/Edge.
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognition = null;
 if (SpeechRecognition) {
@@ -311,22 +414,41 @@ if (SpeechRecognition) {
 
   voiceBtn.addEventListener("click", () => {
     if (voiceBtn.classList.contains("listening")) {
-      recognition.stop();
+      // abort() cancels without firing onresult, so the click really means "stop".
+      recognition.abort();
+      voiceBtn.classList.remove("listening");
+      voiceBtn.title = t().voiceTitle;
+      speakNextReply = false;
       return;
     }
+    if (window.speechSynthesis) speechSynthesis.cancel();
+    speakNextReply = true;
     recognition.lang = langEl.value === "en" ? "en-US" : "es-ES";
-    voiceOutput = true;
     voiceBtn.classList.add("listening");
-    recognition.start();
+    voiceBtn.title = t().voiceTitleStop;
+    try {
+      recognition.start();
+    } catch (e) {
+      // start() throws if already running — defensive.
+      voiceBtn.classList.remove("listening");
+      voiceBtn.title = t().voiceTitle;
+      speakNextReply = false;
+    }
   });
 
   recognition.onresult = (event) => {
     const transcript = event.results[0][0].transcript;
-    inputEl.value = transcript;
     sendMessage(transcript);
   };
-  recognition.onend = () => voiceBtn.classList.remove("listening");
-  recognition.onerror = () => voiceBtn.classList.remove("listening");
+  recognition.onend = () => {
+    voiceBtn.classList.remove("listening");
+    voiceBtn.title = t().voiceTitle;
+  };
+  recognition.onerror = () => {
+    voiceBtn.classList.remove("listening");
+    voiceBtn.title = t().voiceTitle;
+    speakNextReply = false;
+  };
 } else {
   voiceBtn.style.display = "none";
 }
@@ -339,6 +461,7 @@ function speak(text) {
   speechSynthesis.speak(utter);
 }
 
+applyLang();
 startConversation();
 </script>
 </body>
