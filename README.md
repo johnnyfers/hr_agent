@@ -40,12 +40,6 @@ docker compose up --build         # app + postgres
 
 The app talks to Postgres automatically (compose injects `DATABASE_URL`). Postgres data persists in a named volume; `docker compose down -v` wipes it.
 
-Optional: start Redis under a profile (not used by the app yet — see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#caching-analysis--do-we-need-redis) for the rationale):
-
-```bash
-docker compose --profile cache up
-```
-
 ### Without Docker
 
 ```bash

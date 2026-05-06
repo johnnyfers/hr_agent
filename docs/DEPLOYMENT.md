@@ -28,39 +28,16 @@ The shape that works at this scale:
               │  - stateless              │
               └─────────────┬─────────────┘
                             │
-        ┌──────────────┬────┴────┬──────────────┐
-        ▼              ▼         ▼              ▼
-   Postgres       Anthropic   Redis          Object store
-   (state +      (LLM)        (rate limit,   (transcript JSON
-    transcripts)              dedupe keys)    cold archive)
+                   ┌────────┴────────┐
+                   ▼                 ▼
+              Postgres           Anthropic
+              (state +           (LLM)
+               transcripts)
 ```
 
-**Why this is enough.** 200/week peaks at maybe ~5 concurrent conversations. Two replicas of a Python service handle that with room to spare. We avoid Kubernetes, queues, and microservices because the workload doesn't justify them.
+**Why this is enough.** 200/week peaks at maybe ~5 concurrent conversations. Two replicas of a Python service handle that with room to spare. We avoid Kubernetes, queues, microservices, and any caching tier because the workload doesn't justify them.
 
-**What's removable.** Redis is optional until we're managing hot-deduplication of incoming WhatsApp webhooks. Object store is optional — Postgres can hold transcripts at this volume.
-
-## Caching analysis — do we need Redis?
-
-Short answer: **not yet for caching, but yes eventually for other reasons.** I added it to `docker-compose.yml` under the `cache` profile (off by default, started with `docker compose --profile cache up`) so the topology is ready when the use case is real.
-
-**Why caching is not the right framing today:**
-
-| Candidate for caching | Verdict |
-|---|---|
-| Anthropic API responses | **Already cached.** We use the SDK's `cache_control: ephemeral` on the system prompt. Caching is server-side at Anthropic; Redis would not help and would risk staleness. |
-| FAQ retrieval | 10 entries, in-memory dict scan, microseconds. Caching adds latency, not removes it. |
-| Service-area validation | 45 cities + aliases, in-memory. Same as above. |
-| Conversation reads | Postgres with the indexes we ship hits these in <2 ms at this volume. The bottleneck is the LLM (~1-3 s/turn), not the DB. |
-| Analytics aggregations | Compute-on-read across ≤1k rows takes <50 ms. If a recruiter dashboard later polls every 5 s, *then* a 30-second cache wrapper around `analytics.compute()` is a 5-line change — but not required today. |
-
-**When Redis earns its keep:**
-
-1. **Webhook dedupe.** WhatsApp/SMS gateways retry deliveries. `SETNX` with TTL is the canonical idempotency primitive for "have I already processed message id X". Required the day we plug into a real channel.
-2. **Per-candidate rate limiting.** A candidate hammering the chat (or a bug retrying on their side) needs a token bucket. Redis is the standard home.
-3. **Distributed lock for re-engagement scheduler.** Once we add the "ping after 30 min / 24 h / 72 h silence" job, multi-replica coordination needs a lock — Redis `SET NX EX` is sufficient.
-4. **Multi-instance session affinity** — only if we move conversation state out of Postgres into a hot store. Premature.
-
-**Decision:** ship the compose file with Redis defined-but-not-running. The day we wire WhatsApp, we flip the profile and add ~50 lines of dedupe/rate-limit code. We don't run a service today that does nothing.
+**Things we deliberately don't run.** Anthropic does prompt caching server-side; FAQ and service-area lookups are in-memory dict scans (microseconds); conversation reads from Postgres are <2 ms with the indexes we ship; analytics aggregations are <50 ms over <1k rows. There's no caching workload that earns its keep right now. If/when we plug into a real channel (WhatsApp/SMS), we'll need an idempotency store and a rate-limit primitive — pick one then, based on what the channel adapter needs.
 
 ## Stack choices
 
@@ -77,7 +54,7 @@ Short answer: **not yet for caching, but yes eventually for other reasons.** I a
 
 1. Replace `Storage` SQLite driver with asyncpg (interface is unchanged).
 2. Move the `/api/conversations` REST surface behind a WhatsApp webhook adapter (same internal API).
-3. Add Redis for dedupe of inbound message IDs (WhatsApp can replay).
+3. Introduce an idempotency store + rate-limit primitive when we plug into a real channel — gateways retry, candidates can flood.
 4. Swap the static UI for a "recruiter console" — list, filter, summary view, manual override.
 
 ## Monitoring
@@ -136,7 +113,7 @@ Per completed conversation: **~$0.04-0.08**. At 200/week: **~$10-15/week** in LL
 | Validator regression | `tool_dispatch_error` rate up | Roll back service; replay affected conversations via `/api/v1/screenings/{id}/replay`. |
 | Prompt regression | Drop-off up at one stage | A/B between system prompt versions (we keep last 3 in `prompts.py`). |
 | LLM cost runaway | Cost dashboard alert | Enforce per-conversation token budget (config: `MAX_TOKENS_PER_CONVERSATION`); end with `needs_review` when exceeded. |
-| Candidate floods us with spam | One number, many conversations | Rate-limit per phone number at the gateway; existing Redis dedupe handles replay. |
+| Candidate floods us with spam | One number, many conversations | Rate-limit per phone number at the messaging gateway. (Currently single-channel web-only — flood control lives in the API gateway/CDN layer.) |
 
 ## Security
 
