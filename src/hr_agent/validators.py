@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from .jobspec import FieldSpec, JobSpec, ServiceAreas
@@ -269,16 +270,103 @@ def _validate_experience(field: FieldSpec, value: Any) -> ValidationResult:
 
 
 def _validate_date(field: FieldSpec, value: Any) -> ValidationResult:
-    """Free-text date: 'next monday', '2026-05-19', 'in 2 weeks'.
+    """Normalize common free-text dates to ISO ``YYYY-MM-DD``.
 
-    We don't normalise — recruiters can read it. Just bound the length.
+    Supported examples:
+    - absolute: ``2026-05-19``
+    - relative days/weeks: ``tomorrow``, ``in 2 weeks``, ``una semana``
+    - next weekday: ``next monday``, ``próximo lunes``
     """
     if value is None:
         return ValidationResult(ok=False, error="missing date")
+    today = datetime.now(timezone.utc).date()
     s = str(value).strip()
     if not s or len(s) > 100:
         return ValidationResult(ok=False, error="invalid date string")
-    return ValidationResult(ok=True, value=s)
+
+    # ISO date first.
+    try:
+        d = datetime.strptime(s, "%Y-%m-%d").date()
+        if d < today:
+            return ValidationResult(ok=False, error="date is in the past")
+        return ValidationResult(ok=True, value=d.isoformat())
+    except ValueError:
+        pass
+
+    norm = _normalize(s)
+    norm = re.sub(r"\s+", " ", norm).strip()
+
+    # Simple direct tokens.
+    if norm in {"today", "hoy"}:
+        return ValidationResult(ok=True, value=today.isoformat())
+    if norm in {"tomorrow", "manana"}:
+        return ValidationResult(ok=True, value=(today + timedelta(days=1)).isoformat())
+
+    number_words = {
+        "a": 1,
+        "an": 1,
+        "one": 1,
+        "una": 1,
+        "un": 1,
+        "dos": 2,
+        "two": 2,
+        "tres": 3,
+        "three": 3,
+        "cuatro": 4,
+        "four": 4,
+    }
+
+    def parse_qty(token: str) -> Optional[int]:
+        if token.isdigit():
+            return int(token)
+        return number_words.get(token)
+
+    # Patterns like "in 2 weeks", "2 weeks", "one week", "en una semana".
+    m = re.search(
+        r"^(?:in |en )?(?P<n>\d+|a|an|one|two|three|four|un|una|dos|tres|cuatro)\s+"
+        r"(?P<u>day|days|dia|dias|week|weeks|semana|semanas)$",
+        norm,
+    )
+    if m:
+        n = parse_qty(m.group("n"))
+        if n is None or n < 0:
+            return ValidationResult(ok=False, error="invalid relative date")
+        unit = m.group("u")
+        if unit in {"day", "days", "dia", "dias"}:
+            d = today + timedelta(days=n)
+        else:
+            d = today + timedelta(weeks=n)
+        return ValidationResult(ok=True, value=d.isoformat())
+
+    # Next weekday: "next monday", "proximo lunes".
+    weekday_map = {
+        "monday": 0,
+        "lunes": 0,
+        "tuesday": 1,
+        "martes": 1,
+        "wednesday": 2,
+        "miercoles": 2,
+        "thursday": 3,
+        "jueves": 3,
+        "friday": 4,
+        "viernes": 4,
+        "saturday": 5,
+        "sabado": 5,
+        "sunday": 6,
+        "domingo": 6,
+    }
+    m = re.search(
+        r"^(?:next|proximo|proxima)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|lunes|martes|miercoles|jueves|viernes|sabado|domingo)$",
+        norm,
+    )
+    if m:
+        target = weekday_map[m.group(1)]
+        delta = (target - today.weekday()) % 7
+        if delta == 0:
+            delta = 7
+        return ValidationResult(ok=True, value=(today + timedelta(days=delta)).isoformat())
+
+    return ValidationResult(ok=False, error="unrecognized date format")
 
 
 # --- Public entry point -----------------------------------------------------

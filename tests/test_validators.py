@@ -5,6 +5,7 @@ Grupo Sazón JobSpec so the tests reflect what the running agent sees.
 """
 
 import pytest
+from datetime import datetime, timedelta, timezone
 
 from hr_agent.validators import validate_field
 
@@ -181,18 +182,32 @@ class TestExperience:
 
 
 class TestStartDate:
-    def test_accepts_freetext(self, grupo_sazon_spec):
+    def test_accepts_relative_one_week(self, grupo_sazon_spec):
         f = _field(grupo_sazon_spec, "start_date")
-        r = validate_field(f, "next monday", grupo_sazon_spec)
-        assert r.ok and r.value == "next monday"
+        today = datetime.now(timezone.utc).date()
+        r = validate_field(f, "one week", grupo_sazon_spec)
+        assert r.ok
+        parsed = datetime.strptime(r.value, "%Y-%m-%d").date()
+        assert parsed == today + timedelta(days=7)
 
     def test_accepts_iso(self, grupo_sazon_spec):
         f = _field(grupo_sazon_spec, "start_date")
         assert validate_field(f, "2026-05-19", grupo_sazon_spec).ok
 
+    def test_accepts_next_weekday(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "start_date")
+        r = validate_field(f, "next monday", grupo_sazon_spec)
+        assert r.ok
+        parsed = datetime.strptime(r.value, "%Y-%m-%d").date()
+        assert parsed > datetime.now(timezone.utc).date()
+
     def test_rejects_empty(self, grupo_sazon_spec):
         f = _field(grupo_sazon_spec, "start_date")
         assert not validate_field(f, "", grupo_sazon_spec).ok
+
+    def test_rejects_past_date(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "start_date")
+        assert not validate_field(f, "2000-01-01", grupo_sazon_spec).ok
 
     def test_rejects_overlong(self, grupo_sazon_spec):
         f = _field(grupo_sazon_spec, "start_date")

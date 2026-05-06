@@ -21,6 +21,10 @@ from pathlib import Path
 from typing import Optional
 
 from anthropic import Anthropic
+try:
+    from anthropic import OverloadedError
+except ImportError:  # Older SDK path
+    from anthropic._exceptions import OverloadedError
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -194,7 +198,20 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(500, f"job spec missing for {conv.state.job_id}")
 
         pre_count = len(conv.messages)
-        result = app.state.agent.respond(conv, req.message, job)
+        try:
+            result = app.state.agent.respond(conv, req.message, job)
+        except OverloadedError:
+            log.warning("AI provider busy, retry in a few seconds")
+            fallback = "I am unavailable right now, we will talk soon"
+            conv.messages.append(Message(role="assistant", content=fallback))
+            storage.append_message(conv_id, conv.messages[-1])
+            storage.upsert_conversation(conv)
+            return TurnResponse(
+                reply=fallback,
+                state=conv.state,
+                done=conv.state.is_complete(),
+                guardrail_flag="provider_unavailable",
+            )
 
         for m in conv.messages[pre_count:]:
             storage.append_message(conv_id, m)

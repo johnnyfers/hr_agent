@@ -20,10 +20,28 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from anthropic import Anthropic
+try:
+    from anthropic import (
+        APITimeoutError,
+        APIConnectionError,
+        NotFoundError,
+        OverloadedError,
+        RateLimitError,
+    )
+except ImportError:  # Older SDK path fallback
+    from anthropic._exceptions import (  # type: ignore
+        APITimeoutError,
+        APIConnectionError,
+        NotFoundError,
+        OverloadedError,
+        RateLimitError,
+    )
 
 from . import faq as faq_module
 from .guardrails import check_user_input
@@ -40,7 +58,11 @@ from .validators import validate_field
 log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = os.environ.get("HR_AGENT_MODEL", "claude-sonnet-4-6")
-MAX_TURN_ITERATIONS = 6  # safety cap on the tool-use loop within a single user turn
+FALLBACK_MODEL = os.environ.get("HR_AGENT_FALLBACK_MODEL", "claude-haiku-4-5")
+MAX_TURN_ITERATIONS = 10  # safety cap on the tool-use loop within a single user turn
+MAX_PROVIDER_RETRIES = int(os.environ.get("HR_AGENT_PROVIDER_MAX_RETRIES", "4"))
+BACKOFF_BASE_SECONDS = float(os.environ.get("HR_AGENT_PROVIDER_BACKOFF_BASE", "1.0"))
+BACKOFF_JITTER_SECONDS = float(os.environ.get("HR_AGENT_PROVIDER_BACKOFF_JITTER", "0.25"))
 
 
 # --- Tool schemas (dynamic per JobSpec) ------------------------------------
@@ -275,6 +297,55 @@ class ScreeningAgent:
         self.client = client or Anthropic()
         self.model = model
 
+    @staticmethod
+    def _retryable_provider_error(exc: Exception) -> bool:
+        return isinstance(exc, (OverloadedError, RateLimitError, APIConnectionError, APITimeoutError))
+
+    def _retry_model_for_attempt(self, attempt: int) -> str:
+        """Alternate between primary model and fallback model on retries."""
+        if not FALLBACK_MODEL or FALLBACK_MODEL == self.model:
+            return self.model
+        return self.model if attempt % 2 == 0 else FALLBACK_MODEL
+
+    def _create_message_with_backoff(self, *, system: list[dict], messages: list[dict], tools: list[dict]):
+        last_exc: Optional[Exception] = None
+        for attempt in range(MAX_PROVIDER_RETRIES + 1):
+            model = self._retry_model_for_attempt(attempt)
+            try:
+                if attempt > 0:
+                    log.info("retrying provider request attempt=%d model=%s", attempt, model)
+                return self.client.messages.create(
+                    model=model,
+                    max_tokens=1024,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                )
+            except Exception as e:
+                # Fallback model may not exist for this account/region.
+                # If that happens, stay on primary model for remaining attempts.
+                if isinstance(e, NotFoundError) and model == FALLBACK_MODEL:
+                    log.warning(
+                        "fallback model unavailable (%s); using primary model only",
+                        FALLBACK_MODEL,
+                    )
+                    continue
+                last_exc = e
+                if not self._retryable_provider_error(e) or attempt >= MAX_PROVIDER_RETRIES:
+                    raise
+                delay = (BACKOFF_BASE_SECONDS * (2 ** attempt)) + random.uniform(
+                    0, BACKOFF_JITTER_SECONDS
+                )
+                log.warning(
+                    "provider request failed (%s), backing off %.2fs before retry",
+                    type(e).__name__,
+                    delay,
+                )
+                time.sleep(delay)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("provider request failed unexpectedly without exception")
+
     def respond(
         self,
         conversation: Conversation,
@@ -304,9 +375,7 @@ class ScreeningAgent:
 
         for _ in range(MAX_TURN_ITERATIONS):
             system = render_system_prompt(job, conversation.state, guardrail_flag=guard.flag)
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=1024,
+            response = self._create_message_with_backoff(
                 system=[
                     {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
                 ],
@@ -426,11 +495,49 @@ Transcript (last 4k chars):
 {transcript}
 """
     try:
-        response = client.messages.create(
-            model=model,
-            max_tokens=400,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        last_exc: Optional[Exception] = None
+        for attempt in range(MAX_PROVIDER_RETRIES + 1):
+            retry_model = model if attempt % 2 == 0 else (FALLBACK_MODEL or model)
+            try:
+                if attempt > 0:
+                    log.info(
+                        "retrying summary request attempt=%d model=%s",
+                        attempt,
+                        retry_model,
+                    )
+                response = client.messages.create(
+                    model=retry_model,
+                    max_tokens=400,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                break
+            except Exception as e:
+                if isinstance(e, NotFoundError) and retry_model == FALLBACK_MODEL:
+                    log.warning(
+                        "fallback model unavailable for summary (%s); using primary model only",
+                        FALLBACK_MODEL,
+                    )
+                    continue
+                last_exc = e
+                is_retryable = isinstance(
+                    e, (OverloadedError, RateLimitError, APIConnectionError, APITimeoutError)
+                )
+                if not is_retryable or attempt >= MAX_PROVIDER_RETRIES:
+                    raise
+                delay = (BACKOFF_BASE_SECONDS * (2 ** attempt)) + random.uniform(
+                    0, BACKOFF_JITTER_SECONDS
+                )
+                log.warning(
+                    "summary request failed (%s), backing off %.2fs before retry",
+                    type(e).__name__,
+                    delay,
+                )
+                time.sleep(delay)
+        else:
+            if last_exc is not None:
+                raise last_exc
+            raise RuntimeError("summary request failed unexpectedly without exception")
+
         text = "".join(b.text for b in response.content if b.type == "text").strip()
         if text.startswith("```"):
             text = text.strip("`")
