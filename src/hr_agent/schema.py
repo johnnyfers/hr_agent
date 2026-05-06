@@ -61,6 +61,19 @@ class Message(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class ConversationAnalytics(BaseModel):
+    """Persisted per-conversation stats computed from transcript/state."""
+
+    message_count: int = 0
+    user_message_count: int = 0
+    assistant_message_count: int = 0
+    duration_seconds: float = 0.0
+    last_user_at: Optional[datetime] = None
+    last_assistant_at: Optional[datetime] = None
+    final_decision: Decision = Decision.in_progress
+    stage_index: int = 0
+
+
 class Conversation(BaseModel):
     id: str
     candidate_id: Optional[str] = None
@@ -69,3 +82,22 @@ class Conversation(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     summary: Optional[str] = None
+    analytics: ConversationAnalytics = Field(default_factory=ConversationAnalytics)
+
+    def recompute_analytics(self) -> ConversationAnalytics:
+        msgs = self.messages
+        a = ConversationAnalytics(
+            message_count=len(msgs),
+            user_message_count=sum(1 for m in msgs if m.role == "user"),
+            assistant_message_count=sum(1 for m in msgs if m.role == "assistant"),
+            final_decision=self.state.decision,
+            stage_index=self.state.stage_index,
+        )
+        if msgs:
+            a.duration_seconds = round((msgs[-1].timestamp - msgs[0].timestamp).total_seconds(), 2)
+            a.last_user_at = next((m.timestamp for m in reversed(msgs) if m.role == "user"), None)
+            a.last_assistant_at = next(
+                (m.timestamp for m in reversed(msgs) if m.role == "assistant"), None
+            )
+        self.analytics = a
+        return a

@@ -194,12 +194,26 @@ class TestStartDate:
         f = _field(grupo_sazon_spec, "start_date")
         assert validate_field(f, "2026-05-19", grupo_sazon_spec).ok
 
+    def test_accepts_month_name_format(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "start_date")
+        r = validate_field(f, "May 7", grupo_sazon_spec)
+        assert r.ok
+        parsed = datetime.strptime(r.value, "%Y-%m-%d").date()
+        assert parsed.month == 5 and parsed.day == 7
+
     def test_accepts_next_weekday(self, grupo_sazon_spec):
         f = _field(grupo_sazon_spec, "start_date")
         r = validate_field(f, "next monday", grupo_sazon_spec)
         assert r.ok
         parsed = datetime.strptime(r.value, "%Y-%m-%d").date()
         assert parsed > datetime.now(timezone.utc).date()
+
+    def test_accepts_spanish_month_name_format(self, grupo_sazon_spec):
+        f = _field(grupo_sazon_spec, "start_date")
+        r = validate_field(f, "7 de mayo", grupo_sazon_spec)
+        assert r.ok
+        parsed = datetime.strptime(r.value, "%Y-%m-%d").date()
+        assert parsed.month == 5 and parsed.day == 7
 
     def test_rejects_empty(self, grupo_sazon_spec):
         f = _field(grupo_sazon_spec, "start_date")

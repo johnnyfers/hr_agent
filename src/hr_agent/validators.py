@@ -321,6 +321,57 @@ def _validate_date(field: FieldSpec, value: Any) -> ValidationResult:
             return int(token)
         return number_words.get(token)
 
+    month_map = {
+        "january": 1,
+        "jan": 1,
+        "enero": 1,
+        "february": 2,
+        "feb": 2,
+        "febrero": 2,
+        "march": 3,
+        "mar": 3,
+        "marzo": 3,
+        "april": 4,
+        "apr": 4,
+        "abril": 4,
+        "may": 5,
+        "mayo": 5,
+        "june": 6,
+        "jun": 6,
+        "junio": 6,
+        "july": 7,
+        "jul": 7,
+        "julio": 7,
+        "august": 8,
+        "aug": 8,
+        "agosto": 8,
+        "september": 9,
+        "sep": 9,
+        "sept": 9,
+        "septiembre": 9,
+        "october": 10,
+        "oct": 10,
+        "octubre": 10,
+        "november": 11,
+        "nov": 11,
+        "noviembre": 11,
+        "december": 12,
+        "dec": 12,
+        "diciembre": 12,
+    }
+
+    def infer_date(day: int, month: int, year: Optional[int]) -> Optional[datetime.date]:
+        try:
+            if year is not None:
+                return datetime(year, month, day).date()
+            d = datetime(today.year, month, day).date()
+            # If user omitted year and this date has already passed, assume next year.
+            if d < today:
+                d = datetime(today.year + 1, month, day).date()
+            return d
+        except ValueError:
+            return None
+
     # Patterns like "in 2 weeks", "2 weeks", "one week", "en una semana".
     m = re.search(
         r"^(?:in |en )?(?P<n>\d+|a|an|one|two|three|four|un|una|dos|tres|cuatro)\s+"
@@ -336,6 +387,31 @@ def _validate_date(field: FieldSpec, value: Any) -> ValidationResult:
             d = today + timedelta(days=n)
         else:
             d = today + timedelta(weeks=n)
+        return ValidationResult(ok=True, value=d.isoformat())
+
+    # Month-name dates:
+    # - "may 7", "may 7 2026"
+    # - "7 may", "7 de mayo", "7 mayo 2026"
+    m = re.search(
+        r"^(?P<month>[a-z]+)\s+(?P<day>\d{1,2})(?:[,\s]+(?P<year>\d{4}))?$",
+        norm,
+    )
+    if not m:
+        m = re.search(
+            r"^(?P<day>\d{1,2})(?:\s+de)?\s+(?P<month>[a-z]+)(?:[,\s]+(?P<year>\d{4}))?$",
+            norm,
+        )
+    if m:
+        month = month_map.get(m.group("month"))
+        day = int(m.group("day"))
+        year = int(m.group("year")) if m.group("year") else None
+        if month is None:
+            return ValidationResult(ok=False, error="unrecognized month")
+        d = infer_date(day, month, year)
+        if d is None:
+            return ValidationResult(ok=False, error="invalid calendar date")
+        if d < today:
+            return ValidationResult(ok=False, error="date is in the past")
         return ValidationResult(ok=True, value=d.isoformat())
 
     # Next weekday: "next monday", "proximo lunes".

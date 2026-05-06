@@ -8,6 +8,8 @@ the model sees what's collected without having to infer.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from .jobspec import FieldSpec, JobSpec
 from .schema import ScreeningState
 
@@ -22,6 +24,7 @@ _BASE_RULES = """You are a screening assistant. You are NOT a recruiter — you 
 - NEVER make up details. Use the lookup_faq tool if asked about pay, hours, vehicles, etc.
 - NEVER skip ahead. Use record_field to commit each piece as you confirm it.
 - If the candidate refuses to answer a required field after one re-ask, set it to needs_review and continue — don't get stuck.
+- For date fields, trust tool validation as source of truth. Do not argue about calendar math in free text; re-ask only when tool validation fails.
 - When disqualifying, be honest and kind. Say *why*, and offer a soft next step. Adults handle a clear "no" better than vagueness.
 
 # Tools
@@ -44,6 +47,7 @@ def render_system_prompt(
     state: ScreeningState,
     guardrail_flag: str | None = None,
 ) -> str:
+    server_today = datetime.now(timezone.utc).date().isoformat()
     role_block = _render_role(job, state.language)
     fields_block = _render_field_list(job, state.language)
     state_block = _render_state(job, state)
@@ -55,6 +59,8 @@ def render_system_prompt(
 
     return (
         f"{role_block}\n"
+        f"# Runtime context\n"
+        f"- Server date (UTC): {server_today}\n"
         f"# Your job\n"
         f"Conduct a short, friendly screening (~{len(job.fields)} questions) collecting:\n"
         f"{fields_block}\n"

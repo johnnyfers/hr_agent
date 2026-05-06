@@ -23,6 +23,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from anthropic import Anthropic
@@ -187,7 +188,13 @@ def _record_field(state: ScreeningState, job: JobSpec, name: str, value: Any) ->
 
     result = validate_field(field, value, job)
     if not result.ok:
-        return ToolOutcome({"ok": False, "error": result.error})
+        output: dict[str, Any] = {"ok": False, "error": result.error}
+        if field.type == "date":
+            # Give the model an explicit anchor so it doesn't reason against a
+            # different implicit "today" in its own context.
+            output["server_today_utc"] = datetime.now(timezone.utc).date().isoformat()
+            output["hint"] = "Please provide a future start date."
+        return ToolOutcome(output)
 
     state.fields[name] = result.value
 
@@ -244,6 +251,7 @@ def _lookup_faq(state: ScreeningState, job: JobSpec, question: str) -> ToolOutco
 
 def _complete_screening(
     state: ScreeningState,
+    job: JobSpec,
     decision: str,
     reason: str,
     disqualifying_field: Optional[str],
@@ -254,6 +262,17 @@ def _complete_screening(
         return ToolOutcome({"ok": False, "error": f"unknown decision {decision}"})
     if d not in (Decision.qualified, Decision.disqualified, Decision.needs_review):
         return ToolOutcome({"ok": False, "error": f"invalid terminal decision {decision}"})
+
+    if d in (Decision.qualified, Decision.needs_review):
+        missing_required = [f.name for f in job.fields if f.required and f.name not in state.fields]
+        if missing_required:
+            return ToolOutcome(
+                {
+                    "ok": False,
+                    "error": f"cannot complete: missing required fields: {', '.join(missing_required)}",
+                    "missing_required_fields": missing_required,
+                }
+            )
 
     state.decision = d
     state.decision_reason = reason or state.decision_reason
@@ -272,6 +291,7 @@ def dispatch_tool(state: ScreeningState, job: JobSpec, name: str, arguments: dic
     if name == "complete_screening":
         return _complete_screening(
             state,
+            job,
             arguments.get("decision", ""),
             arguments.get("reason", ""),
             arguments.get("disqualifying_field"),
@@ -412,7 +432,7 @@ class ScreeningAgent:
                 break
 
         if not assistant_text:
-            assistant_text = _fallback_reprompt(conversation.state.language)
+            assistant_text = _state_based_fallback(job, conversation.state)
 
         conversation.messages.append(Message(role="assistant", content=assistant_text))
 
@@ -432,6 +452,21 @@ def _fallback_reprompt(language: str) -> str:
     if language == "en":
         return "Sorry — could you say that again?"
     return "Perdona, ¿puedes repetirlo?"
+
+
+def _state_based_fallback(job: JobSpec, state: ScreeningState) -> str:
+    """Deterministic assistant text when model returns no natural-language text."""
+    if state.is_complete():
+        if state.language == "en":
+            return "Thanks — I've captured everything. A recruiter will follow up soon."
+        return "Gracias — ya tengo toda la información. Un reclutador te contactará pronto."
+
+    next_required = next((f for f in job.fields if f.required and f.name not in state.fields), None)
+    if next_required:
+        hint = next_required.prompt_hint.get(state.language) or next_required.prompt_hint.get("es")
+        if hint:
+            return hint
+    return _fallback_reprompt(state.language)
 
 
 # --- Initial greeting -------------------------------------------------------

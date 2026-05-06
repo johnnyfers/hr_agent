@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from .jobspec import Client, JobSpec
-from .schema import Conversation, Decision, Message, ScreeningState
+from .schema import Conversation, ConversationAnalytics, Decision, Message, ScreeningState
 
 log = logging.getLogger(__name__)
 
@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     state_json TEXT NOT NULL,
     decision TEXT NOT NULL,
     summary TEXT,
+    analytics_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -148,6 +149,9 @@ class SqliteStorage(Storage):
         self._lock = threading.Lock()
         with self._connect() as conn:
             conn.executescript(_SQLITE_SCHEMA)
+            cols = [r["name"] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()]
+            if "analytics_json" not in cols:
+                conn.execute("ALTER TABLE conversations ADD COLUMN analytics_json TEXT")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -163,19 +167,21 @@ class SqliteStorage(Storage):
     # --- conversations ---
 
     def upsert_conversation(self, conv: Conversation) -> None:
+        conv.recompute_analytics()
         with self._lock, self._connect() as conn:
             now = datetime.now(timezone.utc).isoformat()
             conv.updated_at = datetime.now(timezone.utc)
             conn.execute(
                 """
-                INSERT INTO conversations (id, candidate_id, job_id, state_json, decision, summary, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO conversations (id, candidate_id, job_id, state_json, decision, summary, analytics_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     candidate_id=excluded.candidate_id,
                     job_id=excluded.job_id,
                     state_json=excluded.state_json,
                     decision=excluded.decision,
                     summary=excluded.summary,
+                    analytics_json=excluded.analytics_json,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -185,6 +191,7 @@ class SqliteStorage(Storage):
                     conv.state.model_dump_json(),
                     conv.state.decision.value,
                     conv.summary,
+                    conv.analytics.model_dump_json(),
                     conv.created_at.isoformat(),
                     now,
                 ),
@@ -222,6 +229,11 @@ class SqliteStorage(Storage):
                 state=ScreeningState.model_validate_json(row["state_json"]),
                 summary=row["summary"],
                 messages=messages,
+                analytics=(
+                    ConversationAnalytics.model_validate_json(row["analytics_json"])
+                    if row["analytics_json"]
+                    else ConversationAnalytics()
+                ),
                 created_at=datetime.fromisoformat(row["created_at"]),
                 updated_at=datetime.fromisoformat(row["updated_at"]),
             )
@@ -244,7 +256,7 @@ class SqliteStorage(Storage):
             where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
             params.append(limit)
             rows = conn.execute(
-                "SELECT id, decision, job_id, state_json, created_at, updated_at "
+                "SELECT id, decision, job_id, state_json, analytics_json, created_at, updated_at "
                 "FROM conversations" + where +
                 " ORDER BY updated_at DESC LIMIT ?",
                 params,
@@ -352,6 +364,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     state_json TEXT NOT NULL,
     decision TEXT NOT NULL,
     summary TEXT,
+    analytics_json TEXT,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL
 );
@@ -381,6 +394,7 @@ class PostgresStorage(Storage):
             try:
                 with self._connect() as conn, conn.cursor() as cur:
                     cur.execute(_PG_SCHEMA)
+                    cur.execute("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS analytics_json TEXT")
                 return
             except Exception as e:
                 last_err = e
@@ -410,19 +424,21 @@ class PostgresStorage(Storage):
     # --- conversations ---
 
     def upsert_conversation(self, conv: Conversation) -> None:
+        conv.recompute_analytics()
         now = datetime.now(timezone.utc)
         conv.updated_at = now
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO conversations (id, candidate_id, job_id, state_json, decision, summary, created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO conversations (id, candidate_id, job_id, state_json, decision, summary, analytics_json, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO UPDATE SET
                     candidate_id = EXCLUDED.candidate_id,
                     job_id       = EXCLUDED.job_id,
                     state_json   = EXCLUDED.state_json,
                     decision     = EXCLUDED.decision,
                     summary      = EXCLUDED.summary,
+                    analytics_json = EXCLUDED.analytics_json,
                     updated_at   = EXCLUDED.updated_at
                 """,
                 (
@@ -432,6 +448,7 @@ class PostgresStorage(Storage):
                     conv.state.model_dump_json(),
                     conv.state.decision.value,
                     conv.summary,
+                    conv.analytics.model_dump_json(),
                     conv.created_at,
                     now,
                 ),
@@ -447,14 +464,14 @@ class PostgresStorage(Storage):
     def get_conversation(self, conv_id: str) -> Optional[Conversation]:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT id, candidate_id, state_json, summary, created_at, updated_at "
+                "SELECT id, candidate_id, state_json, summary, analytics_json, created_at, updated_at "
                 "FROM conversations WHERE id = %s",
                 (conv_id,),
             )
             row = cur.fetchone()
             if not row:
                 return None
-            id_, candidate_id, state_json, summary, created_at, updated_at = row
+            id_, candidate_id, state_json, summary, analytics_json, created_at, updated_at = row
 
             cur.execute(
                 "SELECT role, content, timestamp FROM messages "
@@ -470,6 +487,11 @@ class PostgresStorage(Storage):
                 state=ScreeningState.model_validate_json(state_json),
                 summary=summary,
                 messages=messages,
+                analytics=(
+                    ConversationAnalytics.model_validate_json(analytics_json)
+                    if analytics_json
+                    else ConversationAnalytics()
+                ),
                 created_at=created_at,
                 updated_at=updated_at,
             )
@@ -492,7 +514,7 @@ class PostgresStorage(Storage):
         params.append(limit)
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT id, decision, job_id, state_json, created_at, updated_at "
+                "SELECT id, decision, job_id, state_json, analytics_json, created_at, updated_at "
                 "FROM conversations" + where +
                 " ORDER BY updated_at DESC LIMIT %s",
                 params,

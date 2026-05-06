@@ -149,8 +149,11 @@ def test_lookup_faq_miss(grupo_sazon_spec):
 
 def test_complete_qualified(grupo_sazon_spec):
     state = _state()
-    dispatch_tool(state, grupo_sazon_spec, "complete_screening", {"decision": "qualified", "reason": "all good"})
-    assert state.decision == Decision.qualified
+    out = dispatch_tool(
+        state, grupo_sazon_spec, "complete_screening", {"decision": "qualified", "reason": "all good"}
+    )
+    assert out.output["ok"] is False
+    assert state.decision == Decision.in_progress
 
 
 def test_complete_disqualified_records_field(grupo_sazon_spec):
@@ -163,6 +166,17 @@ def test_complete_disqualified_records_field(grupo_sazon_spec):
     )
     assert state.decision == Decision.disqualified
     assert state.disqualifying_field == "has_license"
+
+
+def test_complete_qualified_requires_all_required_fields(grupo_sazon_spec):
+    state = _state()
+    dispatch_tool(state, grupo_sazon_spec, "record_field", {"field": "has_license", "value": "yes"})
+    out = dispatch_tool(
+        state, grupo_sazon_spec, "complete_screening", {"decision": "qualified", "reason": "done"}
+    )
+    assert out.output["ok"] is False
+    assert "start_date" in out.output.get("missing_required_fields", [])
+    assert state.decision == Decision.in_progress
 
 
 def test_complete_invalid_decision(grupo_sazon_spec):
