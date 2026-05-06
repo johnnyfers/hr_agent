@@ -77,11 +77,39 @@ python scripts/run_simulation.py --persona all       # every persona
 
 **Schema migrations:** the app runs `CREATE TABLE IF NOT EXISTS` on boot, so a fresh DB is fully provisioned. **Schema *changes* are not migrated automatically** — if you upgrade across a schema bump and reuse the old volume, you'll see "column does not exist" errors at boot. For this take-home, drop the volume (`docker compose down -v`) when changing schema. For production this is where Alembic comes in (out of scope for this exercise).
 
+### Seeding
+
+The default Grupo Sazón "Delivery driver" client + job is seeded **automatically on app boot** by [src/hr_agent/seed.py](src/hr_agent/seed.py): every `*.json` in [src/hr_agent/data/seed/](src/hr_agent/data/seed/) is upserted into the `clients` and `jobs` tables. Idempotent — safe to restart any number of times.
+
+You should see this on first boot:
+
+```
+INFO hr_agent.storage storage: using PostgresStorage      # or SqliteStorage
+INFO hr_agent.seed    seeded job: grupo-sazon/delivery-guy (client=grupo-sazon)
+```
+
+Verify after boot:
+
+```bash
+curl http://localhost:8000/api/clients     # → [{"id":"grupo-sazon","name":"Grupo Sazón"}]
+curl http://localhost:8000/api/jobs        # → [{"job_id":"grupo-sazon/delivery-guy", ...}]
+```
+
+**Manual re-seed** (without restarting the app — useful after editing a seed JSON, or for headless setups):
+
+```bash
+# Local:
+python -m hr_agent.seed
+
+# In Docker:
+docker compose exec app python -m hr_agent.seed
+```
+
 ### Multi-client / multi-job
 
-The agent is job-agnostic. Each `(client, job)` pair is a row in the `jobs` table whose `spec_json` column holds a [JobSpec](src/hr_agent/jobspec.py) — the field list, validation rules, FAQ, and service-area whitelist. The default Grupo Sazón "delivery guy" job is seeded on startup from [src/hr_agent/data/seed/grupo-sazon-delivery-guy.json](src/hr_agent/data/seed/grupo-sazon-delivery-guy.json) (idempotent).
+The agent is job-agnostic. Each `(client, job)` pair is a row in the `jobs` table whose `spec_json` column holds a [JobSpec](src/hr_agent/jobspec.py) — the field list, validation rules, FAQ, and service-area whitelist.
 
-To register another client/job, drop a JSON file alongside the seed file and restart, or upsert via storage. The agent's tools, prompts, and validators all derive from the JobSpec at runtime.
+To register another client/job, drop a JSON file alongside the existing seed file and either restart the app or run `python -m hr_agent.seed`. The agent's tools, prompts, and validators all derive from the JobSpec at runtime.
 
 ```bash
 curl http://localhost:8000/api/clients                       # list clients

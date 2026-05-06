@@ -12,7 +12,7 @@ import logging
 from importlib import resources
 
 from .jobspec import JobSpec
-from .storage import Storage
+from .storage import Storage, make_storage
 
 log = logging.getLogger(__name__)
 
@@ -44,3 +44,28 @@ def ensure_default(storage: Storage) -> None:
         storage.upsert_client(spec.client)
         storage.upsert_job(spec)
         log.info("seeded job: %s (client=%s)", spec.job_id, spec.client.id)
+
+
+def main() -> None:
+    """CLI entry point: ``python -m hr_agent.seed``.
+
+    Reads ``DATABASE_URL`` / ``HR_AGENT_DB_PATH`` exactly like the server,
+    so seeding hits the same store the running app would use.
+    """
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except ImportError:
+        pass
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+    storage = make_storage()
+    ensure_default(storage)
+    print("seed complete:")
+    for job in storage.list_jobs():
+        print(f"  - {job.job_id}  ({job.client.name})")
+
+
+if __name__ == "__main__":
+    main()
