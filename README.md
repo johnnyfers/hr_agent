@@ -2,29 +2,29 @@
 
 A conversational AI screener for delivery driver applicants. Replaces phone-based pre-screening with an asynchronous chat that filters out unqualified candidates (~80% of recruiter time) and hands qualified ones to a human recruiter with a structured summary.
 
-Built as a take-home assignment. Stack: Python · FastAPI · Anthropic Claude (Sonnet 4.6) · SQLite · vanilla JS chat UI with Web Speech voice.
+Built as a take-home assignment. Stack: Python · FastAPI · Anthropic Claude (Haiku 4.5 ,Sonnet 4.6 as fallback) · SQLite · vanilla JS chat UI with Web Speech voice.
 
 ---
 
 ## What's in here
 
-| Path | What |
-|---|---|
-| [docs/PHASE1_DESIGN.md](docs/PHASE1_DESIGN.md) | Conversation flow, edge cases, tone guidelines (the design phase) |
-| [docs/ATS_INTEGRATION.md](docs/ATS_INTEGRATION.md) | API spec for connecting to an ATS |
-| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | How to deploy, monitor, scale |
-| `src/hr_agent/agent.py` | LLM agent with tool-use screening flow |
-| `src/hr_agent/schema.py` | Pydantic state models |
-| `src/hr_agent/validators.py` | Deterministic validation (the trust boundary) |
-| `src/hr_agent/prompts.py` | System prompt rendered with live state |
-| `src/hr_agent/faq.py` | Lightweight FAQ retrieval (no vector DB needed at this scale) |
-| `src/hr_agent/guardrails.py` | Pre-LLM input checks + PII redaction |
-| `src/hr_agent/storage.py` | SQLite persistence |
-| `src/hr_agent/analytics.py` | Funnel metrics |
-| `src/hr_agent/server.py` | FastAPI surface |
-| `static/index.html` | Browser chat UI (with Web Speech voice) |
-| `tests/` | Unit + scenario tests with stubbed LLM |
-| `scripts/run_simulation.py` | End-to-end eval — Claude-vs-Claude personas |
+| Path                                               | What                                                              |
+| -------------------------------------------------- | ----------------------------------------------------------------- |
+| [docs/PHASE1_DESIGN.md](docs/PHASE1_DESIGN.md)     | Conversation flow, edge cases, tone guidelines (the design phase) |
+| [docs/ATS_INTEGRATION.md](docs/ATS_INTEGRATION.md) | API spec for connecting to an ATS                                 |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)           | How to deploy, monitor, scale                                     |
+| `src/hr_agent/agent.py`                            | LLM agent with tool-use screening flow                            |
+| `src/hr_agent/schema.py`                           | Pydantic state models                                             |
+| `src/hr_agent/validators.py`                       | Deterministic validation (the trust boundary)                     |
+| `src/hr_agent/prompts.py`                          | System prompt rendered with live state                            |
+| `src/hr_agent/faq.py`                              | Lightweight FAQ retrieval (no vector DB needed at this scale)     |
+| `src/hr_agent/guardrails.py`                       | Pre-LLM input checks + PII redaction                              |
+| `src/hr_agent/storage.py`                          | SQLite persistence                                                |
+| `src/hr_agent/analytics.py`                        | Funnel metrics                                                    |
+| `src/hr_agent/server.py`                           | FastAPI surface                                                   |
+| `static/index.html`                                | Browser chat UI (with Web Speech voice)                           |
+| `tests/`                                           | Unit + scenario tests with stubbed LLM                            |
+| `scripts/run_simulation.py`                        | End-to-end eval — Claude-vs-Claude personas                       |
 
 ---
 
@@ -64,12 +64,12 @@ python scripts/run_simulation.py --persona all       # every persona
 
 ### Storage backends
 
-| Set | Effect |
-|---|---|
-| `DATABASE_URL=postgresql://...` | Use Postgres (psycopg3). Compose sets this automatically. |
-| (unset) | Fall back to SQLite at `HR_AGENT_DB_PATH` (defaults to `./hr_agent.db`). Tests always use SQLite. |
+| Set                             | Effect                                                                                            |
+| ------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL=postgresql://...` | Use Postgres (psycopg3). Compose sets this automatically.                                         |
+| (unset)                         | Fall back to SQLite at `HR_AGENT_DB_PATH` (defaults to `./hr_agent.db`). Tests always use SQLite. |
 
-**Schema migrations:** the app runs `CREATE TABLE IF NOT EXISTS` on boot, so a fresh DB is fully provisioned. **Schema *changes* are not migrated automatically** — if you upgrade across a schema bump and reuse the old volume, you'll see "column does not exist" errors at boot. For this take-home, drop the volume (`docker compose down -v`) when changing schema. For production this is where Alembic comes in (out of scope for this exercise).
+**Schema migrations:** the app runs `CREATE TABLE IF NOT EXISTS` on boot, so a fresh DB is fully provisioned. **Schema _changes_ are not migrated automatically** — if you upgrade across a schema bump and reuse the old volume, you'll see "column does not exist" errors at boot. For this take-home, drop the volume (`docker compose down -v`) when changing schema. For production this is where Alembic comes in (out of scope for this exercise).
 
 ### Seeding
 
@@ -118,20 +118,21 @@ curl -X POST -H 'Content-Type: application/json' \
 
 ### Endpoints
 
-| Method | Path | |
-|---|---|---|
-| `GET`  | `/`                                | Chat UI |
-| `POST` | `/api/conversations`               | Start a screening |
-| `POST` | `/api/conversations/{id}/turn`     | Send a user message |
-| `GET`  | `/api/conversations/{id}`          | Fetch state + transcript |
-| `POST` | `/api/conversations/{id}/summary`  | Generate recruiter summary |
-| `GET`  | `/api/analytics`                   | Funnel metrics |
+| Method | Path                              |                            |
+| ------ | --------------------------------- | -------------------------- |
+| `GET`  | `/`                               | Chat UI                    |
+| `POST` | `/api/conversations`              | Start a screening          |
+| `POST` | `/api/conversations/{id}/turn`    | Send a user message        |
+| `GET`  | `/api/conversations/{id}`         | Fetch state + transcript   |
+| `POST` | `/api/conversations/{id}/summary` | Generate recruiter summary |
+| `GET`  | `/api/analytics`                  | Funnel metrics             |
 
 ---
 
 ## Design decisions worth calling out
 
-**LLM = Claude Sonnet 4.6.** Three reasons specific to this problem:
+**LLM = Claude Haiku 4.5.**/**Sonnet 4.6.** Three reasons specific to this problem:
+
 - **Multilingual ES/EN with code-switching** — Spain + Mexico, candidates mix languages mid-sentence; Sonnet handles it without translation steps.
 - **Tool use is reliable** — every state change goes through a tool call, so the agent's structured output is the same primitive as its reasoning. No second-pass extraction.
 - **Cost at scale** — ~$0.04-0.08 per completed screening with prompt caching on. At 200/week that's ~$10-15/week — orders of magnitude cheaper than a recruiter hour.
@@ -146,9 +147,9 @@ curl -X POST -H 'Content-Type: application/json' \
 
 **Prompt caching.** The system prompt is the bulk of input tokens and is identical across turns within a conversation. It's marked as a cache breakpoint so each turn after the first reads it from cache.
 
-**Guardrails are defence-in-depth.** Prompt injection patterns, length cap, off-topic detection — all happen *before* the LLM sees the message. The LLM also has guardrail rules in its system prompt. Either layer alone is insufficient.
+**Guardrails are defence-in-depth.** Prompt injection patterns, length cap, off-topic detection — all happen _before_ the LLM sees the message. The LLM also has guardrail rules in its system prompt. Either layer alone is insufficient.
 
-**Disqualification etiquette.** When the agent says no, it says *why* and offers a soft next step (re-apply, alternative role). Adults handle a clear "no" better than vagueness. See `docs/PHASE1_DESIGN.md` §5.
+**Disqualification etiquette.** When the agent says no, it says _why_ and offers a soft next step (re-apply, alternative role). Adults handle a clear "no" better than vagueness. See `docs/PHASE1_DESIGN.md` §5.
 
 ---
 
@@ -170,6 +171,7 @@ Skipped: ElevenLabs voice (Web Speech is free and demonstrates the concept; Elev
 ## How to evaluate this
 
 The fastest read:
+
 1. `docs/PHASE1_DESIGN.md` — what I'd build and why
 2. `src/hr_agent/agent.py` — the heart of the system, ~300 lines
 3. `tests/test_scenarios.py` — what behaviours I asserted
